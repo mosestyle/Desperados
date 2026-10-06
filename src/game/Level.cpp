@@ -76,6 +76,14 @@ bool Level::load(SDL_Renderer* r, int number) {
                 for (auto& layer : layers_)
                     if (l.sector >= layer.firstSector && l.sector < layer.firstSector + layer.polygonCount) layer.liftLayer = true;
         }
+        if (const uint8_t* m = file_.chunkData("BUIL", &n))
+            if (!parseBuildings(m, n, buildings_, doors_)) SDL_Log("Level %d: buildings only partly read", number);
+        for (const Door& d : doors_) {  // the motion area at each side (the stored ids are not always set)
+            int s = d.outLayer < (int)layers_.size() ? sectorAt(d.outLayer, d.out.x, d.out.y) : -1;
+            doorOutSec_.push_back(s >= 0 ? s : -1);
+            s = d.building < 0 && d.inLayer < (int)layers_.size() ? sectorAt(d.inLayer, d.in.x, d.in.y) : -1;
+            doorInSec_.push_back(s >= 0 ? s : -1);
+        }
         if (const uint8_t* m = file_.chunkData("SGHT", &n))
             if (!parseSightObstacles(m, n, sight_)) SDL_Log("Level %d: sight obstacles only partly read", number);
         profiles_.load();
@@ -89,6 +97,10 @@ bool Level::load(SDL_Renderer* r, int number) {
             elemInst_.assign(elements.size(), -1);
             for (size_t ei = 0; ei < elements.size(); ++ei) {
                 const LevelElement& el = elements[ei];
+                if (SDL_getenv("DESP_DUMPELEMS"))
+                    SDL_Log("elem %d kind %d cls %d sub %d fac %d %s/%s:%s at %d,%d dir %d prof %d path %d anim %d script %s",
+                            (int)ei, (int)el.kind, el.cls, el.sub, (int)el.faction, el.folder.c_str(), el.file.c_str(),
+                            el.set.c_str(), el.x, el.y, el.dir, el.profile, el.path, el.startAnim, el.script.c_str());
                 elemOffsets_.push_back(el.offset);
                 elemKind_.push_back(el.kind);
                 elemCls_.push_back(el.cls);
@@ -162,7 +174,8 @@ void Level::actorDots(std::vector<ActorDot>& out) const {
     out.clear();
     for (size_t i = 0; i < instances_.size(); ++i) {
         const auto& in = instances_[i];
-        if (in.el.kind != LevelElement::Actor || in.el.faction == Faction::None || in.hidden) continue;
+        if (in.el.kind != LevelElement::Actor || in.el.faction == Faction::None || in.hidden ||
+            (in.building >= 0 && in.el.faction != Faction::Hero)) continue;
         out.push_back({in.x, in.y, in.el.faction, (int)i == selected_});
     }
 }
@@ -345,6 +358,15 @@ void Level::update(float dt) {
             updateFrameRect(in);
             continue;
         }
+        if (in.doorWait > 0) {  // crossing a building, out of sight
+            in.doorWait -= dt;
+            if (in.doorWait <= 0) {
+                in.doorWait = 0;
+                if (!startLeg(in)) setAnim(in, in.prone ? kAnimProne : kAnimIdle, in.dir);
+                updateFrameRect(in);
+            }
+            continue;
+        }
         if (in.lift >= 0) {
             updateLift(in, dt);
             updateFrameRect(in);
@@ -376,7 +398,7 @@ int Level::pickHero(float wx, float wy, float slack) const {
     float bestD = 1e30f;
     for (size_t i = 0; i < instances_.size(); ++i) {
         const auto& in = instances_[i];
-        if (in.el.faction != Faction::Hero || in.ai == Instance::AI::Dead || in.hidden || in.deactivated) continue;
+        if (in.el.faction != Faction::Hero || in.ai == Instance::AI::Dead || in.hidden || in.deactivated || in.building >= 0) continue;
         const SDL_Rect& w = in.world;
         if (wx < w.x - slack || wx > w.x + w.w + slack || wy < w.y - slack || wy > w.y + w.h + slack) continue;
         float cx = in.x, cy = in.y - w.h * 0.4f;  // roughly the body centre
@@ -399,7 +421,14 @@ bool Level::moveSelected(float wx, float wy, bool run) {
     if (in.floor >= (int)nav_.size() || in.ai == Instance::AI::Dead) return false;
     in.untouched = false;
     const int floor = floorForPoint(wx, wy, in.floor);
-    if (floor == in.floor && in.lift < 0 && sectorAt(floor, in.x, in.y) == sectorAt(floor, wx, wy)) {
+    // a tap on a door: go inside that building (and hide there)
+    int door = doorAt(wx, wy);
+    if (door < 0) { door = nearestDoor(wx, wy, 12); if (door >= 0 && doors_[door].building < 0) door = -1; }
+    if (door >= 0 && doors_[door].building != in.building) {
+        if (!routeTo(in, wx, wy, floor, run, doors_[door].building)) return false;
+        target_ = doors_[door].mid;
+    } else if (floor == in.floor && in.lift < 0 && in.building < 0 && in.doorWait <= 0 &&
+               sectorAt(floor, in.x, in.y) == sectorAt(floor, wx, wy)) {
         std::vector<SDL_FPoint> path;
         if (!nav_[in.floor].findPath({in.x, in.y}, {wx, wy}, path) || path.empty()) return false;
         in.route.clear();
@@ -431,7 +460,7 @@ void Level::toggleStanceSelected() {
 bool Level::selectedIdle() const {
     if (selected_ < 0 || selected_ >= (int)instances_.size()) return false;
     const Instance& in = instances_[selected_];
-    return in.path.empty() && in.lift < 0 && in.order == Action::None && in.transition < 0;
+    return !moving(in) && in.order == Action::None && in.transition < 0;
 }
 
 bool Level::selectedProne() const {
@@ -480,7 +509,8 @@ void Level::render(SDL_Renderer* r, const Camera& cam, int sw, int sh) {
         float s = 6 + 10 * (1 - targetFade_);
         drawEllipse(r, cam, target_.x, target_.y, s, s * 0.5f, {120, 255, 120, a});
     }
-    if (selected_ >= 0 && selected_ < (int)instances_.size() && !instances_[selected_].hidden && !userLocked()) {
+    if (selected_ >= 0 && selected_ < (int)instances_.size() && !instances_[selected_].hidden &&
+        instances_[selected_].building < 0 && !userLocked()) {
         const auto& in = instances_[selected_];
         float pulse = 0.85f + 0.15f * std::sin(time_ * 5);
         drawEllipse(r, cam, in.x, in.y, 15 * pulse, 7.5f * pulse, {90, 255, 90, 230});
@@ -502,7 +532,7 @@ void Level::render(SDL_Renderer* r, const Camera& cam, int sw, int sh) {
     const float vx0 = cam.toWorldX(0), vy0 = cam.toWorldY(0), vx1 = cam.toWorldX((float)sw), vy1 = cam.toWorldY((float)sh);
     for (int idx : drawOrder_) {
         Instance& in = instances_[idx];
-        if (in.hidden || in.invisible) continue;
+        if (in.hidden || in.invisible || in.building >= 0) continue;
         const SDL_Rect& w = in.world;
         if (w.w <= 0 || w.x > vx1 || w.y > vy1 || w.x + w.w < vx0 || w.y + w.h < vy0) continue;
         const SpriteAtlas::Slot* slot = atlas_.get(*in.file, in.rec->entries[in.entry].frame);

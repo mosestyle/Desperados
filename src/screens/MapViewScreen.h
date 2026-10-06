@@ -40,6 +40,7 @@ private:
     SDL_FRect objectivesButton() const;
     void drawObjectives(SDL_Renderer* r);
     void drawResult(SDL_Renderer* r);
+    void runTestPlan(float dt);
 
     int level_;
     bool loaded_ = false;

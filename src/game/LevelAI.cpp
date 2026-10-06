@@ -83,7 +83,7 @@ bool Level::lineOfSight(float ax, float ay, float bx, float by, float targetHeig
 }
 
 bool Level::canSee(const Instance& e, const Instance& h, bool& nearZone, float& dist) const {
-    if (h.ai == Instance::AI::Dead || h.floor != e.floor || h.hidden || e.hidden) return false;
+    if (h.ai == Instance::AI::Dead || h.floor != e.floor || h.hidden || e.hidden || h.building >= 0 || e.building >= 0) return false;
     // Until the mission scripts run, a hero still at its scripted start position is ignored
     // (several missions start next to enemies in a cutscene).
     if (h.untouched) return false;
@@ -206,6 +206,7 @@ void Level::raiseAlarm(Instance& e, int heroIdx, float x, float y) {
     e.drawn = false;
     setAnim(e, kAnimIdle, dirTowards(x - e.x, y - e.y));
     playOnce(e, kAnimAlert);
+    if (heroIdx >= 0) npcEvent(e, 1, &instances_[heroIdx]);
     // shout: alert the enemies around
     for (auto& o : instances_) {
         if (&o == &e || o.ai == Instance::AI::Alert) continue;
@@ -316,6 +317,7 @@ void Level::updateEnemy(Instance& e, int idx, float dt) {
             e.ai = Instance::AI::Suspicious;
             e.path.clear();
             e.markT = 1.5f;
+            if (e.target >= 0) npcEvent(e, 0, &instances_[e.target]);
             setAnim(e, kAnimIdle, dirTowards(e.seenX - e.x, e.seenY - e.y));
             break;
         }

@@ -55,46 +55,107 @@ int Level::sectorAt(int layer, float x, float y) const {
     return -1;
 }
 
-// Route over floors: lifts connect motion areas ("sectors"), possibly on the same layer
-// (a wall between two roofs). Breadth-first search from the actor's area to the target's.
-bool Level::planRoute(Instance& in, float x, float y, int floor, std::vector<Instance::Leg>& legs) const {
+bool Level::doorOpenFor(const Door& d, const Instance& in) const {
+    if (d.building >= 0 && !buildings_[d.building].active) return false;
+    switch (in.el.faction) {
+    case Faction::Hero: return !d.lockPC;
+    case Faction::Enemy: return !d.lockVillain;
+    default: return !d.lockCivilian;
+    }
+}
+
+int Level::nearestDoor(float x, float y, float radius) const {
+    int best = -1;
+    float bd = radius * radius;
+    for (int i = 0; i < (int)doors_.size(); ++i) {
+        const float dx = doors_[i].mid.x - x, dy = doors_[i].mid.y - y, d = dx * dx + dy * dy;
+        if (d < bd) { bd = d; best = i; }
+    }
+    return best;
+}
+
+int Level::doorAt(float x, float y) const {
+    for (int i = 0; i < (int)doors_.size(); ++i)
+        if (doors_[i].building >= 0 && doors_[i].outline.size() >= 3 && pointInPolygon(x, y, doors_[i].outline)) return i;
+    return -1;
+}
+
+// Route over floors and through buildings. Lifts connect motion areas ("sectors"), possibly on
+// the same layer (a wall between two roofs); a building connects the outsides of its doors;
+// a stand-alone door connects its two sides. Breadth-first search from the actor's area (or
+// building) to the target's.
+bool Level::planRoute(Instance& in, float x, float y, int floor, std::vector<Instance::Leg>& legs, int goalBuilding) const {
+    using Leg = Instance::Leg;
     legs.clear();
     const int from = in.floor;
-    int startSec = sectorAt(from, in.x, in.y), goalSec = sectorAt(floor, x, y);
-    if (lifts_.empty() || (floor == from && (startSec == goalSec || startSec < 0 || goalSec < 0))) {
-        legs.push_back({-1, true, x, y, floor == from ? from : floor});
+    const bool inside = in.building >= 0;
+    int startSec = inside ? -2 : sectorAt(from, in.x, in.y), goalSec = goalBuilding >= 0 ? -2 : sectorAt(floor, x, y);
+    if (!inside && goalBuilding < 0 && ((lifts_.empty() && doors_.empty()) ||
+                                        (floor == from && (startSec == goalSec || startSec < 0 || goalSec < 0)))) {
+        legs.push_back({Leg::Walk, -1, true, x, y, floor == from ? from : floor});
         return floor == from;
     }
     const bool climber = in.el.faction == Faction::Hero && in.el.sub == kSubCooper;
-    // nodes: sectors; a node unknown (-1) stands for "anywhere on that floor"
-    struct Node { int sector, floor; SDL_FPoint pos; int lift; bool fwd; int prev; };
-    std::vector<Node> nodes{{startSec, from, {in.x, in.y}, -1, true, -1}};
-    std::vector<bool> used(lifts_.size(), false);
+    // node: an area of a floor (sector -1 = anywhere on that floor) or the inside of a building
+    enum Via { Start, ByLift, ByFreeDoor, Into, OutOf };
+    struct Node { int sector, floor, building; SDL_FPoint pos; Via via; int idx; bool fwd; int prev; };
+    std::vector<Node> nodes{{startSec, from, in.building, {in.x, in.y}, Start, -1, true, -1}};
+    std::vector<bool> usedLift(lifts_.size(), false), usedDoor(doors_.size(), false), usedBuilding(buildings_.size(), false);
+    if (inside) usedBuilding[in.building] = true;
+    auto atSide = [&](const Node& n, int layer, int sec) { return layer == n.floor && (n.sector < 0 || sec < 0 || sec == n.sector); };
     int found = -1;
     for (size_t head = 0; head < nodes.size() && found < 0; ++head) {
         const Node cur = nodes[head];
-        if (cur.floor == floor && (goalSec < 0 || cur.sector < 0 || cur.sector == goalSec)) { found = (int)head; break; }
-        std::vector<std::pair<float, int>> cand;
-        for (int i = 0; i < (int)lifts_.size(); ++i) {
-            const Lift& l = lifts_[i];
-            if (used[i] || (l.type == Lift::Wall && !climber)) continue;
-            const bool atA = l.layerA == cur.floor && (cur.sector < 0 || l.sectorA == cur.sector);
-            const bool atB = l.layerB == cur.floor && (cur.sector < 0 || l.sectorB == cur.sector);
-            if (atA) cand.push_back({groundDist(cur.pos.x, cur.pos.y, l.a[0].x, l.a[0].y), i});
-            else if (atB) cand.push_back({groundDist(cur.pos.x, cur.pos.y, l.b[0].x, l.b[0].y), -1 - i});
+        if (goalBuilding >= 0 ? cur.building == goalBuilding
+                              : cur.building < 0 && cur.floor == floor && (goalSec < 0 || cur.sector < 0 || cur.sector == goalSec)) {
+            found = (int)head;
+            break;
         }
-        std::sort(cand.begin(), cand.end());
+        struct Cand { float d; Node n; };
+        std::vector<Cand> cand;
+        if (cur.building >= 0) {  // leave through any open door
+            for (int e : buildings_[cur.building].doors) {
+                const Door& d = doors_[e];
+                if (usedDoor[e] || !doorOpenFor(d, in) || d.outLayer >= (int)layers_.size()) continue;
+                cand.push_back({0, {doorOutSec_[e], d.outLayer, -1, d.out, OutOf, e, true, (int)head}});
+            }
+        } else {
+            for (int i = 0; i < (int)lifts_.size(); ++i) {
+                const Lift& l = lifts_[i];
+                if (usedLift[i] || (l.type == Lift::Wall && !climber)) continue;
+                const bool atA = l.layerA == cur.floor && (cur.sector < 0 || l.sectorA == cur.sector);
+                const bool atB = l.layerB == cur.floor && (cur.sector < 0 || l.sectorB == cur.sector);
+                if (!atA && !atB) continue;
+                const int toFloor = atA ? l.layerB : l.layerA;
+                if (toFloor >= (int)layers_.size()) continue;
+                const SDL_FPoint entry = atA ? l.a[0] : l.b[0], exit = atA ? l.b[0] : l.a[0];
+                int toSec = sectorAt(toFloor, exit.x, exit.y);
+                if (toSec < 0) toSec = atA ? l.sectorB : l.sectorA;
+                cand.push_back({groundDist(cur.pos.x, cur.pos.y, entry.x, entry.y), {toSec, toFloor, -1, exit, ByLift, i, atA, (int)head}});
+            }
+            for (int i = 0; i < (int)doors_.size(); ++i) {
+                const Door& d = doors_[i];
+                if (usedDoor[i] || !doorOpenFor(d, in)) continue;
+                if (d.building >= 0) {
+                    if (usedBuilding[d.building] || !atSide(cur, d.outLayer, doorOutSec_[i])) continue;
+                    cand.push_back({groundDist(cur.pos.x, cur.pos.y, d.out.x, d.out.y), {-2, cur.floor, d.building, d.in, Into, i, true, (int)head}});
+                } else {
+                    const bool atOut = atSide(cur, d.outLayer, doorOutSec_[i]), atIn = atSide(cur, d.inLayer, doorInSec_[i]);
+                    if (!atOut && !atIn) continue;
+                    const int toFloor = atOut ? d.inLayer : d.outLayer;
+                    if (toFloor >= (int)layers_.size()) continue;
+                    const SDL_FPoint entry = atOut ? d.out : d.in, exit = atOut ? d.in : d.out;
+                    cand.push_back({groundDist(cur.pos.x, cur.pos.y, entry.x, entry.y),
+                                    {atOut ? doorInSec_[i] : doorOutSec_[i], toFloor, -1, exit, ByFreeDoor, i, atOut, (int)head}});
+                }
+            }
+        }
+        std::sort(cand.begin(), cand.end(), [](const Cand& a, const Cand& b) { return a.d < b.d; });
         for (const auto& c : cand) {
-            const bool fwd = c.second >= 0;
-            const int i = fwd ? c.second : -1 - c.second;
-            const Lift& l = lifts_[i];
-            used[i] = true;
-            const int toFloor = fwd ? l.layerB : l.layerA;
-            if (toFloor >= (int)layers_.size()) continue;
-            const SDL_FPoint exit = fwd ? l.b[0] : l.a[0];
-            int toSec = sectorAt(toFloor, exit.x, exit.y);
-            if (toSec < 0) toSec = fwd ? l.sectorB : l.sectorA;
-            nodes.push_back({toSec, toFloor, exit, i, fwd, (int)head});
+            if (c.n.via == ByLift) usedLift[c.n.idx] = true;
+            else usedDoor[c.n.idx] = true;
+            if (c.n.via == Into) usedBuilding[c.n.building] = true;
+            nodes.push_back(c.n);
         }
     }
     if (found < 0) return false;
@@ -103,65 +164,134 @@ bool Level::planRoute(Instance& in, float x, float y, int floor, std::vector<Ins
     std::reverse(chain.begin(), chain.end());
     int f = from;
     for (int k : chain) {
-        const Lift& l = lifts_[nodes[k].lift];
-        const SDL_FPoint entry = nodes[k].fwd ? l.a[0] : l.b[0];
-        legs.push_back({-1, true, entry.x, entry.y, f});
-        f = nodes[k].floor;
-        legs.push_back({nodes[k].lift, nodes[k].fwd, 0, 0, f});
+        const Node& n = nodes[k];
+        switch (n.via) {
+        case ByLift: {
+            const Lift& l = lifts_[n.idx];
+            const SDL_FPoint entry = n.fwd ? l.a[0] : l.b[0];
+            legs.push_back({Leg::Walk, -1, true, entry.x, entry.y, f});
+            legs.push_back({Leg::Lift, n.idx, n.fwd, 0, 0, n.floor});
+            break;
+        }
+        case ByFreeDoor: {
+            const Door& d = doors_[n.idx];
+            const SDL_FPoint entry = n.fwd ? d.out : d.in;
+            legs.push_back({Leg::Walk, -1, true, entry.x, entry.y, f});
+            legs.push_back({Leg::Direct, -1, true, d.mid.x, d.mid.y, f});
+            legs.push_back({Leg::Direct, -1, true, n.pos.x, n.pos.y, n.floor});
+            break;
+        }
+        case Into: {
+            const Door& d = doors_[n.idx];
+            legs.push_back({Leg::Walk, -1, true, d.out.x, d.out.y, f});
+            legs.push_back({Leg::Direct, -1, true, d.mid.x, d.mid.y, f});
+            legs.push_back({Leg::Direct, -1, true, d.in.x, d.in.y, f});
+            legs.push_back({Leg::Enter, -1, true, d.in.x, d.in.y, f, n.idx});
+            break;
+        }
+        case OutOf: {
+            const Door& d = doors_[n.idx];
+            legs.push_back({Leg::Exit, -1, true, d.in.x, d.in.y, n.floor, n.idx});
+            legs.push_back({Leg::Direct, -1, true, d.mid.x, d.mid.y, n.floor});
+            legs.push_back({Leg::Direct, -1, true, d.out.x, d.out.y, n.floor});
+            break;
+        }
+        default: break;
+        }
+        f = n.floor;
     }
-    legs.push_back({-1, true, x, y, floor});
+    if (goalBuilding < 0) legs.push_back({Leg::Walk, -1, true, x, y, floor});
     return true;
 }
 
 // Starts the leg at in.routeIdx. Returns false when the route is over.
 bool Level::startLeg(Instance& in) {
+    using Leg = Instance::Leg;
     while (in.routeIdx < in.route.size()) {
-        const Instance::Leg leg = in.route[in.routeIdx++];
-        if (leg.lift >= 0) {
+        const Leg leg = in.route[in.routeIdx++];
+        in.path.clear();
+        in.pathIdx = 0;
+        switch (leg.kind) {
+        case Leg::Lift: {
             const Lift& l = lifts_[leg.lift];
             in.lift = leg.lift;
             in.liftFwd = leg.forward;
             in.liftPos = 0;
-            in.liftPts.clear();
             const SDL_FPoint* s = leg.forward ? l.a : l.b;
             const SDL_FPoint* e = leg.forward ? l.b : l.a;
             in.liftPts = {{in.x, in.y}, s[1], s[2], e[2], e[1], e[0]};
-            in.path.clear();
-            in.pathIdx = 0;
             if (in.prone) startTransition(in, false);  // nobody crawls up a ladder
             return true;
         }
-        in.floor = std::clamp(leg.floor, 0, std::max(0, (int)nav_.size() - 1));
-        in.path.clear();
-        in.pathIdx = 0;
-        if (in.floor < (int)nav_.size() && nav_[in.floor].findPath({in.x, in.y}, {leg.x, leg.y}, in.path) && !in.path.empty())
-            return true;
-        if (groundDist(in.x, in.y, leg.x, leg.y) > 2) { in.path.push_back({leg.x, leg.y}); return true; }
+        case Leg::Enter: {  // gone inside: out of sight while crossing the building
+            const Door& d = doors_[leg.door];
+            in.building = d.building;
+            in.doorWait = 0;
+            // the time to cross the house: until the next exit, if any
+            if (in.routeIdx < in.route.size() && in.route[in.routeIdx].kind == Leg::Exit) {
+                const Door& e = doors_[in.route[in.routeIdx].door];
+                in.doorWait = std::clamp(groundDist(d.in.x, d.in.y, e.in.x, e.in.y) / 60.0f, 0.6f, 4.0f);
+                return true;
+            }
+            if (selected_ >= 0 && &instances_[selected_] == &in) target_ = d.mid;
+            continue;
+        }
+        case Leg::Exit: {
+            const Door& d = doors_[leg.door];
+            in.building = -1;
+            in.x = leg.x;
+            in.y = leg.y;
+            in.floor = std::clamp(leg.floor, 0, std::max(0, (int)nav_.size() - 1));
+            in.dir = dirTowards(d.out.x - d.in.x, d.out.y - d.in.y);
+            continue;
+        }
+        case Leg::Direct:
+            in.floor = std::clamp(leg.floor, 0, std::max(0, (int)nav_.size() - 1));
+            if (groundDist(in.x, in.y, leg.x, leg.y) > 1) { in.path.push_back({leg.x, leg.y}); return true; }
+            continue;
+        case Leg::Walk:
+            in.floor = std::clamp(leg.floor, 0, std::max(0, (int)nav_.size() - 1));
+            if (in.floor < (int)nav_.size() && nav_[in.floor].findPath({in.x, in.y}, {leg.x, leg.y}, in.path) && !in.path.empty())
+                return true;
+            in.path.clear();
+            if (groundDist(in.x, in.y, leg.x, leg.y) > 2) { in.path.push_back({leg.x, leg.y}); return true; }
+            continue;
+        }
     }
     in.route.clear();
     in.routeIdx = 0;
     return false;
 }
 
-bool Level::routeTo(Instance& in, float x, float y, int floor, bool run) {
+bool Level::routeTo(Instance& in, float x, float y, int floor, bool run, int goalBuilding) {
     std::vector<Instance::Leg> legs;
-    const bool ok = planRoute(in, x, y, floor, legs);
+    const bool ok = planRoute(in, x, y, floor, legs, goalBuilding);
     if (SDL_getenv("DESP_SCRIPTLOG")) {
         std::string d;
-        for (const auto& l : legs) d += l.lift >= 0 ? " lift" + std::to_string(l.lift) : " walk(" + std::to_string((int)l.x) + "," + std::to_string((int)l.y) + " f" + std::to_string(l.floor) + ")";
-        SDL_Log("route %s from %.0f,%.0f f%d s%d to %.0f,%.0f f%d s%d:%s", ok ? "ok" : "none", in.x, in.y, in.floor,
-                sectorAt(in.floor, in.x, in.y), x, y, floor, sectorAt(floor, x, y), d.c_str());
+        for (const auto& l : legs)
+            switch (l.kind) {
+            case Instance::Leg::Lift: d += " lift" + std::to_string(l.lift); break;
+            case Instance::Leg::Enter: d += " enter(door" + std::to_string(l.door) + ")"; break;
+            case Instance::Leg::Exit: d += " exit(door" + std::to_string(l.door) + ")"; break;
+            case Instance::Leg::Direct: break;
+            default: d += " walk(" + std::to_string((int)l.x) + "," + std::to_string((int)l.y) + " f" + std::to_string(l.floor) + ")";
+            }
+        SDL_Log("route %s from %.0f,%.0f f%d s%d%s to %.0f,%.0f f%d s%d%s:%s", ok ? "ok" : "none", in.x, in.y, in.floor,
+                sectorAt(in.floor, in.x, in.y), in.building >= 0 ? " (inside)" : "", x, y, floor, sectorAt(floor, x, y),
+                goalBuilding >= 0 ? " (building)" : "", d.c_str());
     }
     if (!ok) return false;
     in.running = run;
-    if (in.lift >= 0) {  // finish the climb first, then follow the new route
-        in.route = std::move(legs);
-        in.routeIdx = 0;
-        return true;
-    }
     in.route = std::move(legs);
     in.routeIdx = 0;
+    if (in.lift >= 0 || in.doorWait > 0) return true;  // finish the climb / the crossing first
     return startLeg(in) || true;
+}
+
+bool Level::moveIntoBuilding(Instance& in, int building, bool run) {
+    if (building < 0 || building >= (int)buildings_.size()) return false;
+    if (in.building == building) return true;
+    return routeTo(in, in.x, in.y, in.floor, run, building);
 }
 
 void Level::updateLift(Instance& in, float dt) {

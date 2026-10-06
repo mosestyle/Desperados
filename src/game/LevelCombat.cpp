@@ -65,14 +65,9 @@ bool Level::actionAvailable(const Instance& h, int action) const {
     return it == actionAvail_.end() || it->second;
 }
 
-// Melee attack of a hero right now: animation, and whether it kills (knife) or knocks out.
+// Punch / kick of a hero (knocks out). Cooper's knife is a separate action (Action::Knife).
 int Level::meleeFor(const Instance& h, bool& kills) const {
     kills = false;
-    if (h.el.sub == kSubCooper) {
-        if (actionAvailable(h, 3) && hasAnim(h.set, kAnimKnife)) { kills = true; return kAnimKnife; }
-        if (actionAvailable(h, 2) && hasAnim(h.set, kAnimPunch)) return kAnimPunch;
-        return -1;
-    }
     if (!actionAvailable(h, 2)) return -1;
     if (h.el.sub == kSubKate && hasAnim(h.set, kAnimKick)) return kAnimKick;
     if (h.el.sub == kSubSanchez && hasAnim(h.set, kAnimSanchezPunch)) return kAnimSanchezPunch;
@@ -83,12 +78,13 @@ int Level::meleeFor(const Instance& h, bool& kills) const {
 bool Level::selectedCan(Action a) const {
     if (selected_ < 0 || selected_ >= (int)instances_.size()) return false;
     const Instance& h = instances_[selected_];
-    if (h.ai == Instance::AI::Dead || h.hidden) return false;
+    if (h.ai == Instance::AI::Dead || h.hidden || h.building >= 0) return false;
     bool kills;
     switch (a) {
     case Action::Gun: return h.gunRange > 0 && actionAvailable(h, 1);
     case Action::Melee: return meleeFor(h, kills) >= 0;
     case Action::Throw: return h.el.sub == kSubCooper && hasAnim(h.set, kAnimThrow) && actionAvailable(h, 4);
+    case Action::Knife: return h.el.sub == kSubCooper && hasAnim(h.set, kAnimKnife) && actionAvailable(h, 3);
     default: return false;
     }
 }
@@ -101,6 +97,7 @@ int Level::selectedActionAnim(Action a) const {
     case Action::Gun: return kAnimShoot;
     case Action::Melee: return meleeFor(h, kills);
     case Action::Throw: return kAnimThrow;
+    case Action::Knife: return kAnimKnife;
     default: return -1;
     }
 }
@@ -108,6 +105,18 @@ int Level::selectedActionAnim(Action a) const {
 float Level::selectedGunRange() const {
     if (selected_ < 0) return 0;
     return instances_[selected_].gunRange;
+}
+
+bool Level::reloadSelected() {
+    if (selected_ < 0 || userLocked()) return false;
+    Instance& h = instances_[selected_];
+    if (h.ai == Instance::AI::Dead || h.hidden || h.transition >= 0 || h.ammo >= h.maxAmmo || h.gunRange <= 0) return false;
+    h.path.clear();
+    h.route.clear();
+    h.order = Action::None;
+    playOnce(h, h.prone ? kAnimReloadProne : kAnimReload);
+    h.pending = kEffectReload;
+    return true;
 }
 
 int Level::selectedAmmo(int* maxAmmo) const {
@@ -125,7 +134,7 @@ int Level::pickTarget(float wx, float wy, float slack) const {
     float bestD = 1e30f;
     for (size_t i = 0; i < instances_.size(); ++i) {
         const auto& in = instances_[i];
-        if (in.hidden || in.ai == Instance::AI::Dead || in.el.faction == Faction::Hero) continue;
+        if (in.hidden || in.building >= 0 || in.ai == Instance::AI::Dead || in.el.faction == Faction::Hero) continue;
         const bool object = in.script >= 0 && in.el.kind != LevelElement::Actor;
         const bool person = in.el.kind == LevelElement::Actor && (in.el.faction == Faction::Civilian || in.el.faction == Faction::Enemy);
         if (!object && !person) continue;
@@ -226,9 +235,9 @@ void Level::updateHeroOrder(Instance& h, int idx, float dt) {
         h.order = Action::None;
         return;
     }
-    // melee
-    bool kills = false;
-    int anim = meleeFor(h, kills);
+    // melee: Cooper's knife kills, punches and kicks knock out
+    bool kills = h.order == Action::Knife;
+    int anim = kills ? kAnimKnife : meleeFor(h, kills);
     if (anim < 0) { h.order = Action::None; return; }
     playOnce(h, anim);
     h.pending = kills ? kEffectKill : kEffectKO;
@@ -251,7 +260,7 @@ void Level::applyPending(Instance& h) {
         return;
     }
     if (effect == kEffectKill || effect == kEffectThrow) { killEnemy(e); return; }
-    if (effect == kEffectKO) { knockOut(e); return; }
+    if (effect == kEffectKO) { knockOut(e); npcEvent(e, 17, &h); return; }
     if (effect == kEffectShot) {
         const float d = groundDist(h.x, h.y, e.x, e.y);
         float chance = std::clamp(1.05f - 0.6f * d / std::max(1.0f, h.gunRange), 0.2f, 0.95f);

@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include "../formats/Buildings.h"
 #include "../formats/Dialogues.h"
 #include "../formats/Image16.h"
 #include "../formats/LevelElements.h"
@@ -31,7 +32,7 @@
 class Level : public ScriptHost {
 public:
     struct ActorDot { float x, y; Faction faction; bool selected; };
-    enum class Action { None, Gun, Melee, Throw };
+    enum class Action { None, Gun, Melee, Throw, Knife };  // Melee = punch / kick (knocks out)
 
     ~Level();
     void stopMusic();
@@ -70,6 +71,7 @@ public:
     bool orderAttack(Action a, int targetIdx);  // selected hero attacks (walks into range first)
     int pickTarget(float wx, float wy, float slack) const;  // enemy, civilian or scripted object
     float selectedGunRange() const;
+    bool reloadSelected();  // reload the gun (the original: click on the grey cartridges)
     int selectedAmmo(int* maxAmmo = nullptr) const;
     void drawRange(SDL_Renderer* r, const Camera& cam, float range, SDL_Color c);
     int firstHero() const;
@@ -165,8 +167,12 @@ private:
         int postDir = -1;
         std::map<int, int> animSwap; // ReplaceAnim
         bool invisible = false;      // script target without a picture (knife-throwing targets...)
-        // route over several floors: walks and lift traversals (stairs, ladders, walls)
-        struct Leg { int lift = -1; bool forward = true; float x = 0, y = 0; int floor = 0; };
+        // route over several floors: walks, lift traversals (stairs, ladders, walls), doors
+        struct Leg {
+            enum Kind { Walk, Direct, Lift, Enter, Exit } kind = Walk;
+            int lift = -1; bool forward = true; float x = 0, y = 0; int floor = 0;
+            int door = -1;  // Enter / Exit: the door used
+        };
         std::vector<Leg> route;
         size_t routeIdx = 0;
         int lift = -1;               // lift being traversed
@@ -174,6 +180,8 @@ private:
         float liftPos = 0;           // distance travelled along liftPts
         std::vector<SDL_FPoint> liftPts;
         SDL_Rect box{0, 0, 0, 0};    // hit box of scripted objects
+        int building = -1;           // inside this building (out of sight)
+        float doorWait = 0;          // time left crossing the inside of a building
     };
     const SpriteFile* sprite(const std::string& folder, const std::string& file);
     void updateFrameRect(Instance& in);
@@ -182,10 +190,16 @@ private:
     // floors and lifts
     int floorForPoint(float x, float y, int prefer) const;
     int sectorAt(int layer, float x, float y) const;
-    bool planRoute(Instance& in, float x, float y, int floor, std::vector<Instance::Leg>& legs) const;
-    bool routeTo(Instance& in, float x, float y, int floor, bool run);
+    // goalBuilding >= 0: the destination is inside that building
+    bool planRoute(Instance& in, float x, float y, int floor, std::vector<Instance::Leg>& legs, int goalBuilding = -1) const;
+    bool routeTo(Instance& in, float x, float y, int floor, bool run, int goalBuilding = -1);
     bool startLeg(Instance& in);
     void updateLift(Instance& in, float dt);
+    bool moving(const Instance& in) const { return !in.path.empty() || in.lift >= 0 || in.doorWait > 0; }
+    bool doorOpenFor(const Door& d, const Instance& in) const;
+    int nearestDoor(float x, float y, float radius) const;
+    bool moveIntoBuilding(Instance& in, int building, bool run);
+    int doorAt(float x, float y) const;  // door whose clickable outline contains the point
     void startTransition(Instance& in, bool toProne);
     static float animSpeed(const SpriteRecord* rec);
     void playOnce(Instance& in, int anim, bool holdLast = false);
@@ -233,6 +247,8 @@ private:
     void updateScripts(float dt);
     int32_t callScript(int scriptIdx, const char* fn, const std::vector<int32_t>& args, bool* found = nullptr);
     void sendEvent(int elem, int32_t id);
+    // Engine event for an NPC's script (FilterEvent(other, id)); returns the script's answer (1 if none).
+    int32_t npcEvent(Instance& npc, int32_t id, const Instance* other);
     void record(int type, const int32_t* a, int n);
     bool startAction(SeqAction& s);
     bool updateAction(SeqAction& s, float dt);
@@ -307,6 +323,9 @@ private:
     std::vector<SDL_Texture*> maskTex_;
     std::vector<MotionLayer> layers_;
     std::vector<Lift> lifts_;
+    std::vector<Building> buildings_;
+    std::vector<Door> doors_;
+    std::vector<int> doorOutSec_, doorInSec_;  // motion area at both sides of each door
     std::vector<PatrolPath> paths_;
     std::vector<SightObstacle> sight_;
     ProfileTable profiles_;

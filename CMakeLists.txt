@@ -52,6 +52,7 @@ set(SOURCES
     src/formats/Image16.cpp
     src/formats/LevelFile.cpp
     src/formats/Lifts.cpp
+    src/formats/Buildings.cpp
     src/formats/LevelElements.cpp
     src/formats/Masks.cpp
     src/formats/MotionAreas.cpp

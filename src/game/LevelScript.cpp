@@ -131,6 +131,8 @@ void Level::place(Instance& in, float x, float y, int floor) {
     in.pathIdx = 0;
     in.route.clear();
     in.lift = -1;
+    in.building = -1;
+    in.doorWait = 0;
     if (in.floor < (int)nav_.size() && !nav_[in.floor].walkableAt(x, y)) {
         SDL_FPoint p;
         if (nav_[in.floor].nearestWalkable({x, y}, p, 6)) { in.x = p.x; in.y = p.y; }
@@ -145,7 +147,7 @@ void Level::moveActor(Instance& in, float x, float y, int floor, bool run) {
     in.pathIdx = 0;
     in.route.clear();
     if (in.prone && run) startTransition(in, false);
-    if (floor != in.floor && routeTo(in, x, y, floor, run)) return;
+    if (routeTo(in, x, y, floor, run)) return;
     if (in.floor < (int)nav_.size() && nav_[in.floor].findPath({in.x, in.y}, {x, y}, in.path) && !in.path.empty()) return;
     in.path.clear();
     in.path.push_back({x, y});
@@ -185,6 +187,7 @@ void Level::showHint(int idx) {
     if (idx < 0 || idx >= (int)dialogues_.hints.size()) return;
     hint_ = gameTexts().line(dialogues_.hintId, dialogues_.hints[idx]);
     hintT_ = 0;
+    if (scriptLog()) SDL_Log("[%5.1f] hint %d: %s", time_, idx, hint_.c_str());
 }
 
 // ------------------------------------------------------------------------------------------
@@ -200,6 +203,15 @@ void Level::initScripts() {
     vm_ = std::make_unique<ScriptVM>(*this);
     size_t n = 0;
     if (const uint8_t* d = file_.chunkData("DLGS", &n)) dialogues_.parse(d, n);
+    if (SDL_getenv("DESP_DUMPTEXT")) {
+        for (size_t i = 0; i < dialogues_.hints.size(); ++i)
+            SDL_Log("hint %d: %s", (int)i, gameTexts().line(dialogues_.hintId, dialogues_.hints[i]).c_str());
+        for (size_t i = 0; i < dialogues_.objectives.size(); ++i)
+            SDL_Log("objective %d: %s", (int)i, gameTexts().line(dialogues_.objectiveId, dialogues_.objectives[i]).c_str());
+        for (size_t i = 0; i < dialogues_.dialogues.size(); ++i)
+            for (const auto& l : dialogues_.dialogues[i])
+                SDL_Log("dialogue %d [%d]: %s", (int)i, l.speaker, gameTexts().line(dialogues_.textId, l.text).c_str());
+    }
     if (const uint8_t* d = file_.chunkData("SCRP", &n)) parseScriptZones(d, n, zones_);
     if (const uint8_t* d = file_.chunkData("MSIC", &n)) {  // u32 version, 3 * (u16 present, u16 len, name)
         size_t o = 4;
@@ -283,6 +295,16 @@ void Level::sendEvent(int e, int32_t id) {
     callScript(elemScript_[e], "FilterEvent", {kActor + e, id});
 }
 
+// Engine events seen in the scripts: 0 an enemy is noticed, 1 / 3 alarm (seen / heard),
+// 17 knocked out. FilterEvent receives the actor that caused it.
+int32_t Level::npcEvent(Instance& npc, int32_t id, const Instance* other) {
+    if (npc.script < 0) return 1;
+    if (scriptLog()) SDL_Log("[%5.1f] engine event %d -> %s", time_, id, npc.el.set.c_str());
+    bool found = false;
+    int32_t r = callScript(npc.script, "FilterEvent", {other ? actorHandle(*other) : 0, id}, &found);
+    return found ? r : 1;
+}
+
 // ------------------------------------------------------------------------------------------
 // sequences
 
@@ -331,6 +353,16 @@ bool Level::startAction(SeqAction& s) {
         if (!in || in->hidden) return true;
         if (!locationOf(s.a[1], x, y, fl)) { if (s.type != A_Move) hide(*in); return true; }
         in->seqBusy++;
+        if (s.type == A_MoveInto) {  // into the building whose door is nearest to the location
+            const int d = nearestDoor(x, y, 300);
+            if (d >= 0 && doors_[d].building >= 0) {
+                in->running = s.a[2] != 0;
+                in->path.clear();
+                if (!moveIntoBuilding(*in, doors_[d].building, s.a[2] != 0)) { place(*in, doors_[d].in.x, doors_[d].in.y, in->floor); in->building = doors_[d].building; }
+                s.t = 0;
+                return false;
+            }
+        }
         moveActor(*in, x, y, fl, s.a[2] != 0);
         s.t = 0;
         return false;
@@ -435,8 +467,8 @@ bool Level::updateAction(SeqAction& s, float dt) {
     case A_Move: case A_LeaveGame: case A_EnterGame: case A_MoveInto:
         if (!in) return true;
         s.t += dt;
-        if (!in->path.empty() && s.t < 60.0f) return false;
-        if (s.type == A_LeaveGame || s.type == A_MoveInto) hide(*in);
+        if (moving(*in) && s.t < 60.0f) return false;
+        if (s.type == A_LeaveGame || (s.type == A_MoveInto && in->building < 0)) hide(*in);
         return true;
     case A_TurnTo: s.t -= dt; return s.t <= 0;
     case A_PlayAnim: case A_PlayAnimFreeze: case A_FireAt: case A_FireLoc:
@@ -494,7 +526,7 @@ void Level::updateZones() {
             if (elemInst_[e] < 0) continue;
             const Instance& in = instances_[elemInst_[e]];
             if (in.el.kind != LevelElement::Actor) continue;
-            const bool now = !in.hidden && zones_[z].contains(in.x, in.y);
+            const bool now = !in.hidden && in.building < 0 && zones_[z].contains(in.x, in.y);
             if (now == (inside[e] != 0)) continue;
             inside[e] = now;
             if (scriptLog() && in.el.faction == Faction::Hero)
@@ -650,7 +682,7 @@ int32_t Level::native(int id, const int32_t* a, int n) {
         int z = (arg(1) & 0xFF000000) == kLoc ? (arg(1) & 0xFFFFFF) : -1;
         return z >= 0 && z < (int)zones_.size() && zones_[z].contains(in->x, in->y);
     }
-    case 0x26: return 0;                                                                     // IsInsideBuilding
+    case 0x26: return in && in->building >= 0 && (arg(1) < 0 || in->building == arg(1));      // IsInsideBuilding
     case 0x27: {                                                                             // GetAnyActorInside
         int z = (arg(0) & 0xFF000000) == kLoc ? (arg(0) & 0xFFFFFF) : -1;
         if (z < 0 || z >= (int)zones_.size()) return 0;
@@ -663,8 +695,19 @@ int32_t Level::native(int id, const int32_t* a, int n) {
     case 0x2b: if (in) in->deactivated = false; if (selected_ < 0) selected_ = firstHero(); return 1;
     case 0x2c: actionAvail_[{elemOf(arg(0)), arg(1)}] = arg(2) != 0; return 1;              // SetActionAvailable
     case 0x2d: { auto it = actionAvail_.find({elemOf(arg(0)), arg(1)}); return it == actionAvail_.end() || it->second; }
-    case 0x2e: props_[{elemOf(arg(0)), arg(1)}] = arg(2); return 1;                         // SetPersistentProperty
-    case 0x2f: { auto it = props_.find({elemOf(arg(0)), arg(1)}); return it == props_.end() ? 0 : it->second; }
+    case 0x2e:                                                                               // SetPersistentProperty
+        // 0 dynamite, 1 sniper bullets, 2 healing doses, 3 flasks, 4 cards, 5 ?, 6 peanuts, 7 stones,
+        // 8 tequila, 10 life points, 11 gatling ammo, 12 concussion, 13 bullets in the gun
+        if (in && arg(1) == 10) in->health = std::clamp(arg(2), 0, in->maxHealth);
+        else if (in && arg(1) == 13) in->ammo = std::clamp(arg(2), 0, std::max(in->maxAmmo, arg(2)));
+        else props_[{elemOf(arg(0)), arg(1)}] = arg(2);
+        return 1;
+    case 0x2f: {                                                                             // GetPersistentProperty
+        if (in && arg(1) == 10) return in->health;
+        if (in && arg(1) == 13) return in->ammo;
+        auto it = props_.find({elemOf(arg(0)), arg(1)});
+        return it == props_.end() ? 0 : it->second;
+    }
     case 0x30:                                                                               // SetAIAlertStatus
         if (in && in->ai != Instance::AI::Dead && in->ai != Instance::AI::KO && in->ai != Instance::AI::None) {
             if (arg(1) == 0) { in->ai = Instance::AI::Calm; in->meter = 0; in->atWaypoint = false; }
@@ -775,7 +818,22 @@ int32_t Level::native(int id, const int32_t* a, int n) {
     case 0x70: return kSound + arg(0);                                                       // GetSoundSource
     case 0x71: case 0x72: case 0x73: return 1;
     case 0x74: case 0x75: case 0x76: case 0x77: return 1;                                    // building/zone bookkeeping
-    case 0x78: case 0x79: case 0x7a: case 0xa9: case 0xbe: case 0xc2: return id == 0xc2 ? 0 : 1;  // doors
+    case 0x78: case 0x79: case 0x7a: case 0xa9: case 0xbe: case 0xc2: {  // doors near a location
+        const int32_t loc = id == 0xbe ? arg(1) : arg(0);
+        if (!locationOf(loc, x, y, fl)) return 0;
+        const int d = nearestDoor(x, y, 300);
+        if (d < 0) { if (scriptLog()) SDL_Log("no door near %.0f,%.0f", x, y); return 0; }
+        Door& door = doors_[d];
+        const bool lock = arg(1) != 0;
+        switch (id) {
+        case 0x78: door.lockPC = lock; if (!lock) door.known = true; return 1;  // LockNearestDoorForPCs
+        case 0x79: door.lockVillain = lock; return 1;
+        case 0x7a: door.lockCivilian = lock; return 1;
+        case 0xa9: door.pickable = lock; return 1;                                  // SetNearestDoorDocLockPickable
+        case 0xbe: door.clickable = arg(0) != 0; return 1;                         // ActivateDoorMouseSector
+        default: return !door.lockPC ? 0 : door.pickable ? 1 : 2;                 // GetDoorStateForPC
+        }
+    }
     case 0x7b: return thisStack_.empty() ? 0 : thisStack_.back();                            // This
     case 0x7c: return in ? in->dir : 0;
     case 0x7d: if (in && !in->hidden) { setAnim(*in, in->prone ? kAnimProne : in->anim < 0 ? kAnimIdle : in->anim, arg(1) & 15); updateFrameRect(*in); } return 1;
@@ -804,8 +862,11 @@ int32_t Level::native(int id, const int32_t* a, int n) {
     case 0x87: case 0x88: case 0x8a: case 0x8b: case 0x8c: case 0x8d: case 0x91: return 1;  // armies
     case 0x89: case 0x8e: case 0x8f: case 0x90: case 0x92: case 0x93: case 0x94: return 0;
     case 0x95: case 0x96: return 1;                                                          // snake / watch
-    case 0x9e: case 0x9f: case 0xa2: case 0xa3: case 0xa5: case 0xa6: case 0xac: case 0xae: case 0xbc: case 0xc4:
+    case 0x9e: case 0x9f: case 0xa2: case 0xa3: case 0xa5: case 0xac: case 0xae: case 0xbc: case 0xc4:
     case 0xc6: case 0xc7: case 0xb7: case 0xb8: case 0xb9: case 0xc0: case 0xc1: case 0xbf: case 0xad: case 0xb3:
+        return 1;
+    case 0xa6:                                                                               // SetBuildingActive
+        if (arg(0) >= 0 && arg(0) < (int)buildings_.size()) buildings_[arg(0)].active = arg(1) != 0;
         return 1;
     case 0xa0:                                                                               // ResetAnim
         if (in) { in->transition = -1; in->holdLast = false; in->anim = -1; setAnim(*in, in->prone ? kAnimProne : kAnimIdle, in->dir); }

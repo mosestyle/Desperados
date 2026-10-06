@@ -7,7 +7,7 @@
 #include "../audio/Audio.h"
 #include "../render/BitmapFont.h"
 
-static const Level::Action kActions[3] = {Level::Action::Gun, Level::Action::Melee, Level::Action::Throw};
+static const Level::Action kActions[4] = {Level::Action::Gun, Level::Action::Knife, Level::Action::Melee, Level::Action::Throw};
 
 MapViewScreen::MapViewScreen(App& app, int number) : Screen(app), level_(number) {
     loaded_ = level.load(app.renderer(), number);
@@ -116,8 +116,15 @@ void MapViewScreen::onGestures(const std::vector<Gesture>& gs) {
                 if (!level.selectedCan(a)) continue;
                 ++slot;
                 if (inButton(actionButton(slot), g.x, g.y)) {
-                    mode_ = mode_ == a ? Level::Action::None : a;
                     buttonHit = true;
+                    int maxAmmo = 0, ammo = level.selectedAmmo(&maxAmmo);
+                    const SDL_FRect b = actionButton(slot);
+                    // the cartridges along the bottom of the gun button reload, like the original's grey cartridges
+                    if (a == Level::Action::Gun && ammo < maxAmmo && g.y > b.y + b.h * 0.68f && level.reloadSelected()) {
+                        mode_ = Level::Action::None;
+                        break;
+                    }
+                    mode_ = mode_ == a ? Level::Action::None : a;
                 }
             }
             if (buttonHit) break;
@@ -152,6 +159,16 @@ void MapViewScreen::onGestures(const std::vector<Gesture>& gs) {
             break;
         }
         case Gesture::LongPress: {  // like the original's spyglass: show an enemy's field of view
+            {  // long press on the gun button reloads
+                int slot = 0;
+                bool reload = false;
+                for (Level::Action a : kActions) {
+                    if (!level.selectedCan(a)) continue;
+                    ++slot;
+                    if (a == Level::Action::Gun && inButton(actionButton(slot), g.x, g.y)) reload = true;
+                }
+                if (reload) { level.reloadSelected(); break; }
+            }
             if (inMinimap(g.x, g.y) || inButton(stanceButton(), g.x, g.y)) break;
             const float wx = cam_.toWorldX(g.x), wy = cam_.toWorldY(g.y);
             int enemy = level.pickEnemy(wx, wy, 16.0f * app_.uiScale() / cam_.zoom + 4.0f);
@@ -161,7 +178,8 @@ void MapViewScreen::onGestures(const std::vector<Gesture>& gs) {
         }
         case Gesture::DoubleTap: {
             if (inMinimap(g.x, g.y) || inButton(stanceButton(), g.x, g.y)) break;
-            if (inButton(actionButton(1), g.x, g.y) || inButton(actionButton(2), g.x, g.y) || inButton(actionButton(3), g.x, g.y)) break;
+            if (inButton(actionButton(1), g.x, g.y) || inButton(actionButton(2), g.x, g.y) || inButton(actionButton(3), g.x, g.y) ||
+                inButton(actionButton(4), g.x, g.y)) break;
             if (mode_ != Level::Action::None) break;
             const float wx = cam_.toWorldX(g.x), wy = cam_.toWorldY(g.y);
             int hero = level.pickHero(wx, wy, 14.0f * app_.uiScale() / cam_.zoom + 4.0f);
@@ -258,51 +276,57 @@ void MapViewScreen::update(float dt) {
         cam_.clamp();
     }
     objectivesT_ = std::max(0.0f, objectivesT_ - dt);
-    static bool moveReached = SDL_getenv("DESP_TESTMOVE") == nullptr;
-    if (const char* t = SDL_getenv("DESP_TESTMOVE")) {  // "x,y" once control is given: walk there (any floor)
-        static bool done = false;
-        static float delay = SDL_getenv("DESP_TESTDELAY") ? (float)SDL_atof(SDL_getenv("DESP_TESTDELAY")) : 0.0f;
-        float x, y;
-        if (!level.userLocked() && level.firstHero() >= 0) delay -= dt;
-        static int tries = 0;
-        static float retry = 0;
-        retry -= dt;
-        float hx0, hy0;
-        if (done && tries < 6 && retry <= 0 && !level.userLocked() && level.selectedIdle() && level.selectedPosition(hx0, hy0) &&
-            SDL_sscanf(t, "%f,%f", &x, &y) == 2 && std::hypot(hx0 - x, hy0 - y) > 12) {
-            done = false;  // interrupted by a cutscene: order again
-            ++tries;
-        }
-        if (!done && delay <= 0 && !level.userLocked() && level.firstHero() >= 0 && SDL_sscanf(t, "%f,%f", &x, &y) == 2) {
-            done = true;
-            retry = 3.0f;
-            if (level.selected() < 0) level.select(level.firstHero());
-            if (SDL_getenv("DESP_TESTPRONE") && !level.selectedProne()) level.toggleStanceSelected();
-            SDL_Log("debug: move to %.0f,%.0f: %s", x, y, level.moveSelected(x, y, false) ? "ok" : "refused");
-        }
-        float hx, hy;
-        if (done && level.selectedPosition(hx, hy)) { cam_.cx = hx; cam_.cy = hy; cam_.clamp(); }
-        if (done && level.selectedPosition(hx, hy) && SDL_sscanf(t, "%f,%f", &x, &y) == 2 && std::hypot(hx - x, hy - y) <= 12 &&
-            level.selectedIdle() && !level.userLocked())
-            moveReached = true;
-    }
-    if (const char* t = SDL_getenv("DESP_TESTATTACK")) {  // "elem,action[;elem,action...]" once control is given
-        static size_t step = 0;
-        static float wait = 0;
-        std::vector<std::pair<int, int>> list;
-        for (const char* p = t; *p;) {
-            int e = 0, a = 1;
-            if (SDL_sscanf(p, "%d,%d", &e, &a) == 2) list.push_back({e, a});
-            while (*p && *p != ';') ++p;
-            if (*p) ++p;
-        }
-        wait -= dt;
-        if (moveReached && !level.userLocked() && level.firstHero() >= 0 && wait <= 0 && step < list.size()) {
-            if (level.debugAttackElement(list[step].first, (Level::Action)list[step].second)) { ++step; wait = 8.0f; }
-            else wait = 2.0f;
-        }
-    }
     if (level.allHeroesDead()) failedT_ += dt;
+    runTestPlan(dt);
+}
+
+// Desktop test driver: DESP_TESTPLAN="p;m x,y;a elem,action;w seconds;s file.bmp" plays steps one
+// after the other whenever the player has control (prone toggle, move, attack, wait, screenshot).
+void MapViewScreen::runTestPlan(float dt) {
+    const char* plan = SDL_getenv("DESP_TESTPLAN");
+    if (!plan) return;
+    static std::vector<std::string> steps;
+    static size_t step = 0;
+    static int tries = 0;
+    static float wait = 0, settle = 0;
+    if (steps.empty()) {
+        std::string cur;
+        for (const char* p = plan;; ++p) {
+            if (*p == ';' || *p == 0) { if (!cur.empty()) steps.push_back(cur); cur.clear(); if (!*p) break; }
+            else cur += *p;
+        }
+        steps.push_back("end");
+    }
+    float hx, hy;
+    if (level.selectedPosition(hx, hy)) { cam_.cx = hx; cam_.cy = hy; cam_.clamp(); }
+    if (step >= steps.size()) return;
+    const bool ready = !level.userLocked() && level.firstHero() >= 0 && level.selectedIdle();
+    settle = ready ? settle + dt : 0;
+    wait -= dt;
+    if (settle < 0.6f || wait > 0) return;
+    const std::string& s = steps[step];
+    float x = 0, y = 0;
+    int e = 0, a = 0;
+    if (level.selected() < 0) level.select(level.firstHero());
+    if (s == "p") { level.toggleStanceSelected(); ++step; SDL_Log("plan: prone toggled"); return; }
+    if (s == "r") { SDL_Log("plan: reload %s", level.reloadSelected() ? "ok" : "refused"); ++step; return; }
+    if (s == "end") { SDL_Log("plan: finished"); ++step; return; }
+    if (s[0] == 'w') { wait = (float)SDL_atof(s.c_str() + 1); ++step; return; }
+    if (s[0] == 'm' && SDL_sscanf(s.c_str() + 1, "%f,%f", &x, &y) == 2) {
+        if (std::hypot(hx - x, hy - y) <= 14) { SDL_Log("plan: reached %.0f,%.0f", x, y); ++step; tries = 0; return; }
+        if (++tries > 8) { SDL_Log("plan: cannot reach %.0f,%.0f (at %.0f,%.0f)", x, y, hx, hy); ++step; tries = 0; return; }
+        SDL_Log("plan: move to %.0f,%.0f: %s", x, y, level.moveSelected(x, y, false) ? "ok" : "refused");
+        wait = 1.0f;
+        return;
+    }
+    if (s[0] == 'a' && SDL_sscanf(s.c_str() + 1, "%d,%d", &e, &a) == 2) {
+        if (level.debugAttackElement(e, (Level::Action)a)) { ++step; tries = 0; wait = 2.0f; return; }
+        if (++tries > 10) { ++step; tries = 0; }
+        wait = 2.0f;
+        return;
+    }
+    SDL_Log("plan: bad step '%s'", s.c_str());
+    ++step;
 }
 
 SDL_FRect MapViewScreen::skipButton() const {
