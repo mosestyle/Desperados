@@ -14,6 +14,7 @@ struct AppOptions {
     int startLevel = 0;        // open this level directly (1-25)
     std::string autotest;      // screenshot prefix for the scripted self-test (desktop)
     int width = 1600, height = 720;
+    std::string navDump;       // --navdump file.bmp: save the walkable grid of the level
     std::string shot;          // --shot file.bmp: render the level once and save a screenshot
     float viewX = -1, viewY = -1, viewZoom = 0;
 };

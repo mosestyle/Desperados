@@ -31,6 +31,9 @@ private:
     bool inMinimap(float x, float y) const;
     void jumpFromMinimap(float x, float y, bool animate);
     bool selectHeroOnMinimap(float x, float y);
+    SDL_FRect stanceButton() const;
+    bool inButton(const SDL_FRect& b, float x, float y) const;
+    void drawButton(SDL_Renderer* r, const SDL_FRect& b, bool active);
 
     int level_;
     bool loaded_ = false;
@@ -40,4 +43,6 @@ private:
     bool draggingMinimap_ = false;
     bool firstLayout_ = true;
     bool lastTapMoved_ = false;
+    uint32_t lastButtonTap_ = 0;
+    bool dragFromButton_ = false;
 };

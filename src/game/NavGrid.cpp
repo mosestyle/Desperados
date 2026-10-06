@@ -28,21 +28,42 @@ static void fillPolygon(std::vector<uint8_t>& cells, int w, int h, const std::ve
     }
 }
 
+// Blocks every cell the segment passes through (supercover traversal), so even
+// obstacles thinner than a cell - fences are often 1-3 px wide - can't be crossed.
+void NavGrid::blockSegment(float x0, float y0, float x1, float y1) {
+    float fx0 = x0 / kCell, fy0 = y0 / kCell, fx1 = x1 / kCell, fy1 = y1 / kCell;
+    int cx = (int)std::floor(fx0), cy = (int)std::floor(fy0);
+    const int ex = (int)std::floor(fx1), ey = (int)std::floor(fy1);
+    const float dx = fx1 - fx0, dy = fy1 - fy0;
+    const int sx = dx > 0 ? 1 : -1, sy = dy > 0 ? 1 : -1;
+    const float tdx = dx != 0 ? std::fabs(1.0f / dx) : 1e30f, tdy = dy != 0 ? std::fabs(1.0f / dy) : 1e30f;
+    float tx = dx != 0 ? ((sx > 0 ? (cx + 1 - fx0) : (fx0 - cx)) * tdx) : 1e30f;
+    float ty = dy != 0 ? ((sy > 0 ? (cy + 1 - fy0) : (fy0 - cy)) * tdy) : 1e30f;
+    for (int guard = 0; guard < 100000; ++guard) {
+        if (cx >= 0 && cy >= 0 && cx < w_ && cy < h_) cells_[(size_t)cy * w_ + cx] = 0;
+        if (cx == ex && cy == ey) break;
+        if (std::fabs(tx - ty) < 1e-6f) {  // passing exactly through a corner: block both neighbours
+            if (cx + sx >= 0 && cx + sx < w_ && cy >= 0 && cy < h_) cells_[(size_t)cy * w_ + cx + sx] = 0;
+            if (cy + sy >= 0 && cy + sy < h_ && cx >= 0 && cx < w_) cells_[(size_t)(cy + sy) * w_ + cx] = 0;
+            tx += tdx; ty += tdy; cx += sx; cy += sy;
+        } else if (tx < ty) { tx += tdx; cx += sx; }
+        else { ty += tdy; cy += sy; }
+        if (tx > 1.0f + tdx && ty > 1.0f + tdy) break;
+    }
+}
+
 void NavGrid::build(const MotionLayer& layer, int worldW, int worldH) {
     w_ = (worldW + kCell - 1) / kCell;
     h_ = (worldH + kCell - 1) / kCell;
     cells_.assign((size_t)w_ * h_, 0);
+    for (const auto& area : layer.areas) fillPolygon(cells_, w_, h_, area.outline, 1);
     for (const auto& area : layer.areas) {
-        fillPolygon(cells_, w_, h_, area.outline, 1);
-        for (const auto& hole : area.holes) fillPolygon(cells_, w_, h_, hole, 0);
-        for (const auto& ln : area.lines) {  // thin barriers: block every cell the segment touches
-            float dx = (float)(ln.x1 - ln.x0), dy = (float)(ln.y1 - ln.y0);
-            int steps = (int)(std::max(std::fabs(dx), std::fabs(dy)) / (kCell * 0.5f)) + 1;
-            for (int i = 0; i <= steps; ++i) {
-                int cx = (int)((ln.x0 + dx * i / steps) / kCell), cy = (int)((ln.y0 + dy * i / steps) / kCell);
-                if (cx >= 0 && cy >= 0 && cx < w_ && cy < h_) cells_[(size_t)cy * w_ + cx] = 0;
-            }
+        for (const auto& hole : area.holes) {
+            fillPolygon(cells_, w_, h_, hole, 0);
+            for (size_t i = 0, j = hole.size() - 1; i < hole.size(); j = i++)
+                blockSegment((float)hole[j].x, (float)hole[j].y, (float)hole[i].x, (float)hole[i].y);
         }
+        for (const auto& ln : area.lines) blockSegment((float)ln.x0, (float)ln.y0, (float)ln.x1, (float)ln.y1);
     }
 }
 
@@ -83,7 +104,7 @@ bool NavGrid::findPath(SDL_FPoint from, SDL_FPoint to, std::vector<SDL_FPoint>& 
     out.clear();
     if (cells_.empty()) return false;
     SDL_FPoint start, goal;
-    if (!nearestWalkable(from, start, 20) || !nearestWalkable(to, goal, 60)) return false;
+    if (!nearestWalkable(from, start, 30) || !nearestWalkable(to, goal, 90)) return false;
     const int sx = (int)(start.x / kCell), sy = (int)(start.y / kCell);
     const int gx = (int)(goal.x / kCell), gy = (int)(goal.y / kCell);
     if (sx == gx && sy == gy) { out.push_back(goal); return true; }
@@ -108,7 +129,7 @@ bool NavGrid::findPath(SDL_FPoint from, SDL_FPoint to, std::vector<SDL_FPoint>& 
         if (closed[cur.idx]) continue;
         closed[cur.idx] = 1;
         if (cur.idx == goalIdx) { reached = true; break; }
-        if (++expanded > 400000) break;
+        if (++expanded > 600000) break;
         int x = cur.idx % w_, y = cur.idx / w_;
         for (int k = 0; k < 8; ++k) {
             int nx = x + DX[k], ny = y + DY[k];

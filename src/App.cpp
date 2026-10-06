@@ -155,6 +155,11 @@ int App::run() {
         graveyard_.clear();
         if (screens_.empty()) break;
 
+        if (!opt_.navDump.empty()) {
+            if (auto* mv = dynamic_cast<MapViewScreen*>(screens_.back().get())) mv->levelData().dumpNav(opt_.navDump, 0);
+            running_ = false;
+            break;
+        }
         if (!opt_.shot.empty() && ++frameCount_ == 3) {
             if (auto* mv = dynamic_cast<MapViewScreen*>(screens_.back().get()))
             {
@@ -222,10 +227,19 @@ void App::runAutotestStep(uint32_t now) {
                 }
             }
         });
+        auto tapButton = [this]() {  // stance button, bottom right (same formula as MapViewScreen)
+            float s = std::min(h_ * 0.2f, w_ * 0.12f), m = h_ * 0.03f;
+            float x = w_ - m - s / 2, y = h_ - m - s / 2;
+            injectFinger(SDL_FINGERDOWN, 1, x, y);
+            injectFinger(SDL_FINGERUP, 1, x, y);
+        };
         at(500, [=] { saveScreenshot(P + "_a_start.bmp"); });
-        at(600, [=] { tapWorld(tx, ty, false); });
-        at(1600, [=] { saveScreenshot(P + "_b_walking.bmp"); });
-        at(5000, [=] { saveScreenshot(P + "_c_arrived.bmp"); });
+        at(600, [=] { tapButton(); });
+        at(1500, [=] { saveScreenshot(P + "_b_prone.bmp"); });
+        at(1600, [=] { tapWorld(tx, ty, false); });
+        at(3500, [=] { saveScreenshot(P + "_c_crawling.bmp"); });
+        at(3600, [=] { tapButton(); });
+        at(4600, [=] { saveScreenshot(P + "_d_standing.bmp"); });
         at(5100, [=] {
             float hx, hy;
             if (mv() && mv()->levelData().selectedPosition(hx, hy)) SDL_Log("hero now at %.0f,%.0f", hx, hy);

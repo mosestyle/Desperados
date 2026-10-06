@@ -67,6 +67,7 @@ void MapViewScreen::onGestures(const std::vector<Gesture>& gs) {
     for (const auto& g : gs) {
         switch (g.type) {
         case Gesture::DragStart:
+            dragFromButton_ = inButton(stanceButton(), g.x, g.y);
             draggingMinimap_ = g.fingers == 1 && inMinimap(g.x, g.y);
             cam_.vx = cam_.vy = 0;
             cam_.flying = false;
@@ -84,6 +85,12 @@ void MapViewScreen::onGestures(const std::vector<Gesture>& gs) {
             draggingMinimap_ = false;
             break;
         case Gesture::Tap: {
+            if (inButton(stanceButton(), g.x, g.y)) {
+                uint32_t now = SDL_GetTicks();
+                if (now - lastButtonTap_ > 350) level.toggleStanceSelected();  // ignore the 2nd tap of a double tap
+                lastButtonTap_ = now;
+                break;
+            }
             if (inMinimap(g.x, g.y)) {
                 if (!selectHeroOnMinimap(g.x, g.y)) jumpFromMinimap(g.x, g.y, true);
                 break;
@@ -96,7 +103,7 @@ void MapViewScreen::onGestures(const std::vector<Gesture>& gs) {
             break;
         }
         case Gesture::DoubleTap: {
-            if (inMinimap(g.x, g.y)) break;
+            if (inMinimap(g.x, g.y) || inButton(stanceButton(), g.x, g.y)) break;
             const float wx = cam_.toWorldX(g.x), wy = cam_.toWorldY(g.y);
             int hero = level.pickHero(wx, wy, 14.0f * app_.uiScale() / cam_.zoom + 4.0f);
             float hx, hy;
@@ -111,6 +118,36 @@ void MapViewScreen::onGestures(const std::vector<Gesture>& gs) {
             break;
         }
     }
+}
+
+SDL_FRect MapViewScreen::stanceButton() const {
+    float s = std::min(app_.height() * 0.2f, app_.width() * 0.12f);
+    float m = app_.height() * 0.03f;
+    return {app_.width() - s - m, app_.height() - s - m, s, s};
+}
+
+bool MapViewScreen::inButton(const SDL_FRect& b, float x, float y) const {
+    float cx = b.x + b.w / 2, cy = b.y + b.h / 2, r = b.w * 0.6f;  // a bit larger than drawn
+    return (x - cx) * (x - cx) + (y - cy) * (y - cy) <= r * r;
+}
+
+static void fillCircle(SDL_Renderer* r, float cx, float cy, float rad, SDL_Color c) {
+    constexpr int N = 40;
+    SDL_Vertex v[N + 2];
+    v[0] = {{cx, cy}, c, {0, 0}};
+    for (int i = 0; i <= N; ++i) {
+        float a = (float)i / N * 6.2831853f;
+        v[i + 1] = {{cx + std::cos(a) * rad, cy + std::sin(a) * rad}, c, {0, 0}};
+    }
+    int idx[N * 3];
+    for (int i = 0; i < N; ++i) { idx[i * 3] = 0; idx[i * 3 + 1] = i + 1; idx[i * 3 + 2] = i + 2; }
+    SDL_RenderGeometry(r, nullptr, v, N + 2, idx, N * 3);
+}
+
+void MapViewScreen::drawButton(SDL_Renderer* r, const SDL_FRect& b, bool active) {
+    float cx = b.x + b.w / 2, cy = b.y + b.h / 2, rad = b.w / 2;
+    fillCircle(r, cx, cy, rad, active ? SDL_Color{200, 150, 70, 235} : SDL_Color{120, 84, 40, 235});
+    fillCircle(r, cx, cy, rad * 0.88f, SDL_Color{38, 26, 16, 225});
 }
 
 bool MapViewScreen::selectHeroOnMinimap(float x, float y) {
@@ -144,6 +181,15 @@ void MapViewScreen::render(SDL_Renderer* r) {
     SDL_RenderClear(r);
     if (!loaded_) return;
     level.render(r, cam_, app_.width(), app_.height());
+
+    // stance button: shows the posture you switch to (lying figure = get down, standing = get up)
+    if (level.selected() >= 0) {
+        SDL_FRect b = stanceButton();
+        const bool prone = level.selectedProne();
+        drawButton(r, b, prone);
+        float pad = b.w * 0.2f;
+        level.drawSelectedFrame(r, {b.x + pad, b.y + pad, b.w - 2 * pad, b.h - 2 * pad}, prone ? 0 : 7, 6);
+    }
 
     if (miniTex_) {
         SDL_FRect rc = minimapRect();

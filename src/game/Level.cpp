@@ -8,9 +8,8 @@
 
 static constexpr float kTicksPerSecond = 25.0f;  // original engine rate
 static constexpr float kPi = 3.14159265358979f;
-static constexpr int kAnimIdle = 0, kAnimWalk = 3, kAnimRun = 5;
-// Ground speeds (px/s): walk animations move 2 px per frame, run 6 px, at 25 frames/s.
-static constexpr float kWalkSpeed = 50.0f, kRunSpeed = 150.0f;
+static constexpr int kAnimIdle = 0, kAnimWalk = 3, kAnimRun = 5, kAnimGetDown = 6, kAnimProne = 7, kAnimCrawl = 9,
+                     kAnimGetUp = 10;
 
 static std::string lower(std::string s) {
     std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return (char)std::tolower(c); });
@@ -204,14 +203,41 @@ void Level::setAnim(Instance& in, int anim, int dir) {
     in.entry %= (int)rec->entries.size();
 }
 
+// Ground speed of a movement animation: the original moves `step` px per frame and shows
+// each frame for `duration` ticks (0 = one tick), at 25 ticks per second.
+float Level::animSpeed(const SpriteRecord* rec) {
+    if (!rec || rec->entries.empty()) return 50.0f;
+    int steps = 0, ticks = 0;
+    for (const auto& e : rec->entries) { steps += std::max<int>(0, e.step); ticks += std::max<int>(1, e.duration); }
+    float v = steps > 0 ? steps * kTicksPerSecond / (float)ticks : 50.0f;
+    return std::clamp(v, 10.0f, 400.0f);
+}
+
+void Level::startTransition(Instance& in, bool toProne) {
+    if (in.prone == toProne) return;
+    in.prone = toProne;
+    const int anim = toProne ? kAnimGetDown : kAnimGetUp;
+    const SpriteRecord* rec = in.set->find(anim, in.dir);
+    if (!rec || rec->entries.empty() || rec->anim != anim) {  // no animation: switch directly
+        setAnim(in, toProne ? kAnimProne : kAnimIdle, in.dir);
+        return;
+    }
+    in.transition = anim;
+    in.anim = anim;
+    in.rec = rec;
+    in.entry = 0;
+    in.ticks = 0;
+}
+
 void Level::updateMovement(Instance& in, float dt) {
-    float budget = (in.running ? kRunSpeed : kWalkSpeed) * dt;  // ground distance this frame
+    const int moveAnim = in.prone ? kAnimCrawl : (in.running ? kAnimRun : kAnimWalk);
+    float budget = animSpeed(in.set->find(moveAnim, in.dir)) * dt;  // ground distance this frame
     while (budget > 0 && in.pathIdx < in.path.size()) {
         const SDL_FPoint wp = in.path[in.pathIdx];
         float dx = wp.x - in.x, dy = wp.y - in.y;
         float len = std::sqrt(dx * dx + 4 * dy * dy);
         if (len < 0.01f) { ++in.pathIdx; continue; }
-        setAnim(in, in.running ? kAnimRun : kAnimWalk, directionOf(dx, dy));
+        setAnim(in, moveAnim, directionOf(dx, dy));
         float move = std::min(budget, len);
         in.x += dx * move / len;
         in.y += dy * move / len;
@@ -219,18 +245,30 @@ void Level::updateMovement(Instance& in, float dt) {
         in.stepAcc += move;
         if (move >= len) ++in.pathIdx;
     }
-    // advance the walk cycle by distance, as the original does (frames have a step, no duration)
+    // Walk/run frames have no duration and advance by distance (feet don't slide);
+    // crawl frames have durations and advance by time.
     const auto& entries = in.rec->entries;
-    for (int guard = 0; guard < 32; ++guard) {
-        int step = std::max<int>(1, entries[in.entry].step);
-        if (in.stepAcc < step) break;
-        in.stepAcc -= step;
-        in.entry = (in.entry + 1) % (int)entries.size();
+    if (entries[in.entry].duration > 0) {
+        in.ticks += dt * kTicksPerSecond;
+        for (int guard = 0; guard < 32; ++guard) {
+            float dur = (float)std::max<int>(1, entries[in.entry].duration);
+            if (in.ticks < dur) break;
+            in.ticks -= dur;
+            in.entry = (in.entry + 1) % (int)entries.size();
+        }
+        in.stepAcc = 0;
+    } else {
+        for (int guard = 0; guard < 32; ++guard) {
+            int step = std::max<int>(1, entries[in.entry].step);
+            if (in.stepAcc < step) break;
+            in.stepAcc -= step;
+            in.entry = (in.entry + 1) % (int)entries.size();
+        }
     }
     if (in.pathIdx >= in.path.size()) {
         in.path.clear();
         in.pathIdx = 0;
-        setAnim(in, kAnimIdle, in.dir);
+        setAnim(in, in.prone ? kAnimProne : kAnimIdle, in.dir);
     }
 }
 
@@ -239,6 +277,25 @@ void Level::update(float dt) {
     targetFade_ = std::max(0.0f, targetFade_ - dt * 1.2f);
     const float ticks = dt * kTicksPerSecond;
     for (auto& in : instances_) {
+        if (in.transition >= 0) {  // get down / stand up: play once, then continue
+            const auto& entries = in.rec->entries;
+            in.ticks += ticks;
+            bool done = false;
+            for (int guard = 0; guard < 16; ++guard) {
+                float dur = (float)std::max<int>(1, entries[in.entry].duration);
+                if (in.ticks < dur) break;
+                in.ticks -= dur;
+                if (in.entry + 1 >= (int)entries.size()) { done = true; break; }
+                ++in.entry;
+            }
+            if (done) {
+                in.transition = -1;
+                in.anim = -1;
+                setAnim(in, in.prone ? kAnimProne : kAnimIdle, in.dir);
+            }
+            updateFrameRect(in);
+            continue;
+        }
         if (!in.path.empty()) {
             updateMovement(in, dt);
             updateFrameRect(in);
@@ -290,9 +347,35 @@ bool Level::moveSelected(float wx, float wy, bool run) {
     in.path = std::move(path);
     in.pathIdx = 0;
     in.running = run;
+    if (run && in.prone) startTransition(in, false);  // running means standing up first
     target_ = in.path.back();
     targetFade_ = 1.0f;
     return true;
+}
+
+void Level::toggleStanceSelected() {
+    if (selected_ < 0 || selected_ >= (int)instances_.size()) return;
+    Instance& in = instances_[selected_];
+    if (in.transition >= 0) return;
+    in.running = false;
+    startTransition(in, !in.prone);
+}
+
+bool Level::selectedProne() const {
+    return selected_ >= 0 && selected_ < (int)instances_.size() && instances_[selected_].prone;
+}
+
+void Level::drawSelectedFrame(SDL_Renderer* r, SDL_FRect box, int anim, int dir) {
+    if (selected_ < 0 || selected_ >= (int)instances_.size()) return;
+    const Instance& in = instances_[selected_];
+    const SpriteRecord* rec = in.set->find(anim, dir);
+    if (!rec || rec->entries.empty()) return;
+    const SpriteEntry& e = rec->entries[rec->entries.size() - 1];
+    const SpriteAtlas::Slot* slot = atlas_.get(*in.file, e.frame);
+    if (!slot) return;
+    float s = std::min(box.w / slot->rc.w, box.h / slot->rc.h);
+    SDL_FRect dst{box.x + (box.w - slot->rc.w * s) / 2, box.y + (box.h - slot->rc.h * s) / 2, slot->rc.w * s, slot->rc.h * s};
+    SDL_RenderCopyF(r, slot->tex, &slot->rc, &dst);
 }
 
 void Level::setSelectedRunning(bool run) {
@@ -361,4 +444,23 @@ void Level::render(SDL_Renderer* r, const Camera& cam, int sw, int sh) {
         }
         if (clipped) SDL_RenderSetClipRect(r, nullptr);
     }
+}
+
+bool Level::dumpNav(const std::string& path, int layer) const {
+    if (layer < 0 || layer >= (int)nav_.size()) return false;
+    const NavGrid& g = nav_[layer];
+    SDL_Surface* s = SDL_CreateRGBSurfaceWithFormat(0, background_.w, background_.h, 32, SDL_PIXELFORMAT_ARGB8888);
+    if (!s) return false;
+    uint32_t* px = (uint32_t*)s->pixels;
+    for (int y = 0; y < background_.h; ++y)
+        for (int x = 0; x < background_.w; ++x) {
+            uint16_t p = background_.px[(size_t)y * background_.w + x];
+            uint32_t R = ((p >> 11) & 31) * 255 / 31, G = ((p >> 5) & 63) * 255 / 63, B = (p & 31) * 255 / 31;
+            bool blocked = g.blockedCell(x / NavGrid::kCell, y / NavGrid::kCell);
+            if (blocked) { R = R / 3 + 150; G /= 3; B /= 3; }
+            px[(size_t)y * (s->pitch / 4) + x] = 0xFF000000u | (R << 16) | (G << 8) | B;
+        }
+    int rc = SDL_SaveBMP(s, path.c_str());
+    SDL_FreeSurface(s);
+    return rc == 0;
 }

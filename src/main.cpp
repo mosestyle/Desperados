@@ -18,6 +18,7 @@ int main(int argc, char* argv[]) {
         else if (a == "--level") opt.startLevel = std::atoi(next("0").c_str());
         else if (a == "--autotest") opt.autotest = next("autotest");
         else if (a == "--shot") opt.shot = next("shot.bmp");
+        else if (a == "--navdump") opt.navDump = next("nav.bmp");
         else if (a == "--view") {  // x,y,zoom
             std::string v = next("0,0,1");
             SDL_sscanf(v.c_str(), "%f,%f,%f", &opt.viewX, &opt.viewY, &opt.viewZoom);

@@ -46,8 +46,14 @@ public:
     // Sends the selected hero to a world point. Returns false if it can't get there.
     bool moveSelected(float wx, float wy, bool run);
     void setSelectedRunning(bool run);
+    // Stance: standing <-> lying (crawling when moving). Plays the get-down / stand-up animation.
+    void toggleStanceSelected();
+    bool selectedProne() const;
+    // Draws a frame of the selected hero's sprite fitted into `box` (used for HUD buttons).
+    void drawSelectedFrame(SDL_Renderer* r, SDL_FRect box, int anim, int dir);
     int firstHero() const;
     bool showMasks = true;
+    bool dumpNav(const std::string& bmpPath, int layer) const;  // debug: walkable cells as an image
 
 private:
     struct Instance {
@@ -66,11 +72,15 @@ private:
         size_t pathIdx = 0;
         bool running = false;
         float stepAcc = 0;          // ground distance walked on the current frame
+        bool prone = false;         // lying down / crawling
+        int transition = -1;        // one-shot animation playing (get down / stand up), -1 = none
     };
     const SpriteFile* sprite(const std::string& folder, const std::string& file);
     void updateFrameRect(Instance& in);
     void setAnim(Instance& in, int anim, int dir);
     void updateMovement(Instance& in, float dt);
+    void startTransition(Instance& in, bool toProne);
+    static float animSpeed(const SpriteRecord* rec);
     void drawEllipse(SDL_Renderer* r, const Camera& cam, float x, float y, float rx, float ry, SDL_Color c);
 
     int number_ = 0;
