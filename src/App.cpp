@@ -213,6 +213,39 @@ void App::saveScreenshot(const std::string& path) {
 }
 
 void App::runAutotestStep(uint32_t now) {
+    if (steps_.empty() && opt_.startLevel > 0 && opt_.heroX >= 0) {
+        // Combat script: hero placed with --hero; shoot the nearest enemy, then knife the next one.
+        const std::string P = opt_.autotest;
+        auto at = [this](uint32_t t, std::function<void()> fn) { steps_.push_back({t, std::move(fn)}); };
+        auto mv = [this]() { return dynamic_cast<MapViewScreen*>(screens_.back().get()); };
+        auto tapScreen = [this](float x, float y) { injectFinger(SDL_FINGERDOWN, 1, x, y); injectFinger(SDL_FINGERUP, 1, x, y); };
+        auto button = [this](int slot) {  // same formula as MapViewScreen::actionButton / stanceButton
+            float s = std::min(h_ * 0.2f, w_ * 0.12f), m = h_ * 0.03f;
+            return SDL_FPoint{w_ - m - s / 2 - slot * s * 1.12f, h_ - m - s / 2};
+        };
+        auto tapEnemy = [this, mv, tapScreen](int skip) {
+            MapViewScreen* m = mv();
+            float hx, hy, ex, ey;
+            if (!m || !m->levelData().selectedPosition(hx, hy) || !m->levelData().debugNearestEnemy(hx, hy, ex, ey, skip)) return;
+            tapScreen(m->camera().toScreenX(ex), m->camera().toScreenY(ey));
+        };
+        at(200, [=] {
+            if (MapViewScreen* m = mv()) {
+                m->levelData().debugPlaceSelected(opt_.heroX, opt_.heroY);
+                m->setView(opt_.heroX, opt_.heroY, 1.6f);
+            }
+        });
+        at(500, [=] { saveScreenshot(P + "_1_start.bmp"); });
+        const bool knifeFirst = SDL_getenv("DESP_KNIFE") != nullptr;
+        at(600, [=] { SDL_FPoint b = button(knifeFirst ? 2 : 1); tapScreen(b.x, b.y); });  // gun (or knife) mode
+        at(800, [=] { tapEnemy(0); });
+        at(1500, [=] { saveScreenshot(P + "_2_shot.bmp"); if (mv()) mv()->levelData().debugState(); });
+        at(1600, [=] { tapEnemy(0); });  // second shot if still standing
+        at(2600, [=] { saveScreenshot(P + "_3_shot2.bmp"); if (mv()) mv()->levelData().debugState(); });
+        at(2700, [=] { SDL_FPoint b = button(2); tapScreen(b.x, b.y); });  // melee mode
+        at(2800, [=] { tapEnemy(0); });
+        at(6500, [=] { saveScreenshot(P + "_4_melee.bmp"); if (mv()) mv()->levelData().debugState(); running_ = false; });
+    }
     if (steps_.empty() && opt_.startLevel > 0) {
         // Level script: select the first hero, walk to a point, then run to another (tap + double tap).
         const std::string P = opt_.autotest;

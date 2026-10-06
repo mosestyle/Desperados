@@ -32,6 +32,7 @@ private:
     void jumpFromMinimap(float x, float y, bool animate);
     bool selectHeroOnMinimap(float x, float y);
     SDL_FRect stanceButton() const;
+    SDL_FRect actionButton(int slot) const;  // slot 1 = gun, 2 = melee (left of the stance button)
     bool inButton(const SDL_FRect& b, float x, float y) const;
     void drawButton(SDL_Renderer* r, const SDL_FRect& b, bool active);
 
@@ -46,4 +47,5 @@ private:
     uint32_t lastButtonTap_ = 0;
     bool dragFromButton_ = false;
     float failedT_ = 0;
+    Level::Action mode_ = Level::Action::None;  // waiting for a target to be tapped
 };

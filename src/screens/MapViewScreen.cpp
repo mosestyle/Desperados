@@ -90,6 +90,28 @@ void MapViewScreen::onGestures(const std::vector<Gesture>& gs) {
             draggingMinimap_ = false;
             break;
         case Gesture::Tap: {
+            bool buttonHit = false;
+            for (int slot = 1; slot <= 2; ++slot) {
+                Level::Action a = slot == 1 ? Level::Action::Gun : Level::Action::Melee;
+                if (level.selectedCan(a) && inButton(actionButton(slot), g.x, g.y)) {
+                    mode_ = mode_ == a ? Level::Action::None : a;
+                    buttonHit = true;
+                }
+            }
+            if (buttonHit) break;
+            if (mode_ != Level::Action::None && !inMinimap(g.x, g.y) && !inButton(stanceButton(), g.x, g.y)) {
+                // targeting: tap an enemy to attack; tapping anything else cancels
+                const float wx = cam_.toWorldX(g.x), wy = cam_.toWorldY(g.y);
+                int enemy = level.pickEnemy(wx, wy, 16.0f * app_.uiScale() / cam_.zoom + 4.0f);
+                if (enemy >= 0 && level.orderAttack(mode_, enemy)) {
+                    if (mode_ == Level::Action::Melee) mode_ = Level::Action::None;
+                    break;
+                }
+                int hero = level.pickHero(wx, wy, 14.0f * app_.uiScale() / cam_.zoom + 4.0f);
+                if (hero >= 0) level.select(hero);
+                mode_ = Level::Action::None;
+                break;
+            }
             if (inButton(stanceButton(), g.x, g.y)) {
                 uint32_t now = SDL_GetTicks();
                 if (now - lastButtonTap_ > 350) level.toggleStanceSelected();  // ignore the 2nd tap of a double tap
@@ -117,6 +139,8 @@ void MapViewScreen::onGestures(const std::vector<Gesture>& gs) {
         }
         case Gesture::DoubleTap: {
             if (inMinimap(g.x, g.y) || inButton(stanceButton(), g.x, g.y)) break;
+            if (inButton(actionButton(1), g.x, g.y) || inButton(actionButton(2), g.x, g.y)) break;
+            if (mode_ != Level::Action::None) break;
             const float wx = cam_.toWorldX(g.x), wy = cam_.toWorldY(g.y);
             int hero = level.pickHero(wx, wy, 14.0f * app_.uiScale() / cam_.zoom + 4.0f);
             float hx, hy;
@@ -131,6 +155,12 @@ void MapViewScreen::onGestures(const std::vector<Gesture>& gs) {
             break;
         }
     }
+}
+
+SDL_FRect MapViewScreen::actionButton(int slot) const {
+    SDL_FRect b = stanceButton();
+    b.x -= slot * (b.w * 1.12f);
+    return b;
 }
 
 SDL_FRect MapViewScreen::stanceButton() const {
@@ -205,6 +235,9 @@ void MapViewScreen::render(SDL_Renderer* r) {
         return;
     }
 
+    if (mode_ != Level::Action::None && !level.selectedCan(mode_)) mode_ = Level::Action::None;
+    if (mode_ == Level::Action::Gun) level.drawRange(r, cam_, level.selectedGunRange(), {255, 220, 90, 170});
+
     // stance button: shows the posture you switch to (lying figure = get down, standing = get up)
     if (level.selected() >= 0) {
         SDL_FRect b = stanceButton();
@@ -212,6 +245,25 @@ void MapViewScreen::render(SDL_Renderer* r) {
         drawButton(r, b, prone);
         float pad = b.w * 0.2f;
         level.drawSelectedFrame(r, {b.x + pad, b.y + pad, b.w - 2 * pad, b.h - 2 * pad}, prone ? 0 : 7, 6);
+        // action buttons: the hero's own shooting / melee animation as the icon
+        for (int slot = 1; slot <= 2; ++slot) {
+            Level::Action a = slot == 1 ? Level::Action::Gun : Level::Action::Melee;
+            if (!level.selectedCan(a)) continue;
+            SDL_FRect ab = actionButton(slot);
+            drawButton(r, ab, mode_ == a);
+            level.drawSelectedFrame(r, {ab.x + pad, ab.y + pad, ab.w - 2 * pad, ab.h - 2 * pad},
+                                    level.selectedActionAnim(a), 6, 1);
+            if (a == Level::Action::Gun) {  // ammo pips
+                int maxAmmo = 0, ammo = level.selectedAmmo(&maxAmmo);
+                float pip = std::max(3.0f, ab.w * 0.05f), gap = pip * 0.6f;
+                float total = maxAmmo * pip + (maxAmmo - 1) * gap, x0 = ab.x + (ab.w - total) / 2, y0 = ab.y + ab.h - pip * 0.5f;
+                for (int i = 0; i < maxAmmo; ++i) {
+                    SDL_FRect p{x0 + i * (pip + gap), y0, pip, pip};
+                    SDL_SetRenderDrawColor(r, i < ammo ? 240 : 70, i < ammo ? 200 : 55, i < ammo ? 90 : 40, 255);
+                    SDL_RenderFillRectF(r, &p);
+                }
+            }
+        }
     }
 
     if (miniTex_) {

@@ -109,6 +109,7 @@ bool Level::load(SDL_Renderer* r, int number) {
     }
     recreateTextures(r);
     initAI();
+    initHeroes();
     selected_ = firstHero();
     SDL_Log("Level %d: %dx%d, %d elements (%d actors), %d sprite files, %d masks, %d layers, %d paths, %d sight "
             "obstacles, loaded in %u ms", number, background_.w, background_.h, (int)instances_.size(), actorCount(),
@@ -251,6 +252,7 @@ void Level::updateMovement(Instance& in, float dt) {
         float len = std::sqrt(dx * dx + 4 * dy * dy);
         if (len < 0.01f) { ++in.pathIdx; continue; }
         setAnim(in, moveAnim, directionOf(dx, dy));
+        in.drawn = false;  // walking holsters the gun
         float move = std::min(budget, len);
         in.x += dx * move / len;
         in.y += dy * move / len;
@@ -308,6 +310,7 @@ void Level::update(float dt) {
                     in.anim = -1;
                     setAnim(in, in.prone ? kAnimProne : kAnimIdle, in.dir);
                 }
+                if (in.pending) applyPending(in);
             }
             updateFrameRect(in);
             continue;
@@ -365,6 +368,7 @@ bool Level::moveSelected(float wx, float wy, bool run) {
     in.path = std::move(path);
     in.pathIdx = 0;
     in.running = run;
+    in.order = Action::None;  // a new move cancels an attack order
     if (run && in.prone) startTransition(in, false);  // running means standing up first
     target_ = in.path.back();
     targetFade_ = 1.0f;
@@ -377,6 +381,8 @@ void Level::toggleStanceSelected() {
     if (in.transition >= 0 || in.ai == Instance::AI::Dead) return;
     in.untouched = false;
     in.running = false;
+    in.order = Action::None;
+    in.drawn = false;
     startTransition(in, !in.prone);
 }
 
@@ -384,12 +390,13 @@ bool Level::selectedProne() const {
     return selected_ >= 0 && selected_ < (int)instances_.size() && instances_[selected_].prone;
 }
 
-void Level::drawSelectedFrame(SDL_Renderer* r, SDL_FRect box, int anim, int dir) {
-    if (selected_ < 0 || selected_ >= (int)instances_.size()) return;
+void Level::drawSelectedFrame(SDL_Renderer* r, SDL_FRect box, int anim, int dir, int entry) {
+    if (selected_ < 0 || selected_ >= (int)instances_.size() || anim < 0) return;
     const Instance& in = instances_[selected_];
     const SpriteRecord* rec = in.set->find(anim, dir);
     if (!rec || rec->entries.empty()) return;
-    const SpriteEntry& e = rec->entries[rec->entries.size() - 1];
+    const int ei = entry < 0 || entry >= (int)rec->entries.size() ? (int)rec->entries.size() - 1 : entry;
+    const SpriteEntry& e = rec->entries[ei];
     const SpriteAtlas::Slot* slot = atlas_.get(*in.file, e.frame);
     if (!slot) return;
     float s = std::min(box.w / slot->rc.w, box.h / slot->rc.h);
@@ -433,7 +440,8 @@ void Level::render(SDL_Renderer* r, const Camera& cam, int sw, int sh) {
 
     // enemy fields of view lie on the ground, under everything
     for (const auto& in : instances_)
-        if (in.ai != Instance::AI::None && in.ai != Instance::AI::Dead &&
+        if (in.ai != Instance::AI::None && in.ai != Instance::AI::Dead && in.ai != Instance::AI::KO &&
+            in.el.faction == Faction::Enemy &&
             (in.showCone || in.ai == Instance::AI::Suspicious || in.ai == Instance::AI::Alert))
             drawCone(r, cam, in);
 

@@ -17,6 +17,7 @@
 #include "../formats/Profiles.h"
 #include "../formats/SightObstacles.h"
 #include "../formats/SpriteFile.h"
+#include "../formats/Weapons.h"
 #include "../render/SpriteAtlas.h"
 #include "../render/Textures.h"
 #include "Camera.h"
@@ -25,6 +26,7 @@
 class Level {
 public:
     struct ActorDot { float x, y; Faction faction; bool selected; };
+    enum class Action { None, Gun, Melee };
 
     ~Level();
     bool load(SDL_Renderer* r, int number);
@@ -53,7 +55,15 @@ public:
     void toggleStanceSelected();
     bool selectedProne() const;
     // Draws a frame of the selected hero's sprite fitted into `box` (used for HUD buttons).
-    void drawSelectedFrame(SDL_Renderer* r, SDL_FRect box, int anim, int dir);
+    void drawSelectedFrame(SDL_Renderer* r, SDL_FRect box, int anim, int dir, int entry = -1);
+
+    // --- hero actions (LevelCombat.cpp) ---
+    bool selectedCan(Action a) const;
+    int selectedActionAnim(Action a) const;    // animation used as the button icon
+    bool orderAttack(Action a, int enemyIdx);  // selected hero attacks an enemy (walks into range first)
+    float selectedGunRange() const;
+    int selectedAmmo(int* maxAmmo = nullptr) const;
+    void drawRange(SDL_Renderer* r, const Camera& cam, float range, SDL_Color c);
     int firstHero() const;
     bool showMasks = true;
     bool dumpNav(const std::string& bmpPath, int layer) const;  // debug: walkable cells as an image
@@ -64,6 +74,8 @@ public:
     void hideAllCones();
     void showAllCones();
     void debugPlaceSelected(float x, float y);
+    bool debugNearestEnemy(float x, float y, float& ex, float& ey, int skip = 0) const;
+    void debugState() const;
     bool allHeroesDead() const;
     int alertedCount() const;
 
@@ -88,7 +100,7 @@ private:
         int transition = -1;        // one-shot animation playing, -1 = none
         bool holdLast = false;      // stay on the last frame of the one-shot (dead)
         // --- AI / health ---
-        enum class AI { None, Calm, Suspicious, Alert, Searching, Dead } ai = AI::None;
+        enum class AI { None, Calm, Suspicious, Alert, Searching, KO, Dead } ai = AI::None;
         int health = 100, maxHealth = 100;
         const Profile* profile = nullptr;
         int pathId = -1, wpIdx = 0;          // patrol route and current waypoint
@@ -103,6 +115,17 @@ private:
         bool drawn = false, showCone = false;
         bool untouched = true;               // hero not commanded yet (scripted start positions are safe)
         int searchTurns = 0;
+        float koT = 0;                       // knocked out: time until waking up
+        bool discovered = false;             // body already found by an enemy
+        // hero orders
+        Action order = Action::None;
+        int orderTarget = -1;
+        float orderRepath = 0;
+        int pending = 0, pendingTarget = -1; // effect applied when the current one-shot animation ends
+        int ammo = 0, maxAmmo = 0;
+        float gunRange = 0;
+        int meleeAnim = -1;
+        bool meleeKills = false;
     };
     const SpriteFile* sprite(const std::string& folder, const std::string& file);
     void updateFrameRect(Instance& in);
@@ -127,6 +150,15 @@ private:
     void renderAI(SDL_Renderer* r, const Camera& cam, int sw, int sh);
     void drawCone(SDL_Renderer* r, const Camera& cam, const Instance& e);
     void drawMarker(SDL_Renderer* r, const Camera& cam, const Instance& e);
+    void alertTo(Instance& e, int heroIdx, float x, float y);
+    void noise(float x, float y, float radius, int heroIdx);
+    // combat (LevelCombat.cpp)
+    void initHeroes();
+    void updateHeroOrder(Instance& h, int idx, float dt);
+    void applyPending(Instance& in);
+    void killEnemy(Instance& e);
+    void knockOut(Instance& e);
+    void hurtEnemy(Instance& e, int damage, int heroIdx);
     void drawEllipse(SDL_Renderer* r, const Camera& cam, float x, float y, float rx, float ry, SDL_Color c);
 
     int number_ = 0;
@@ -139,6 +171,7 @@ private:
     std::vector<PatrolPath> paths_;
     std::vector<SightObstacle> sight_;
     ProfileTable profiles_;
+    WeaponTable weapons_;
     std::vector<NavGrid> nav_;
     std::vector<std::unique_ptr<SpriteFile>> sprites_;
     std::map<std::string, const SpriteFile*> spriteByKey_;

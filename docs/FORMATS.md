@@ -144,6 +144,13 @@ starts at that NPC's feet.
 percentages. The designers' test profiles ("Courage <= 5", "IQ 100", "Cowboy3 sniper") confirm
 the field meanings.
 
+## Weapons (data/configuration/weapons.dat) - partly decoded
+
+`u16 version 4, u16 count`, 51-byte records: `s32 id, char name[16], u16 range, u16 ?, u16 ammo,
+5 * u16 ?, u8 table[15]` (probably hit chances per distance band and stance). Heroes' weapons:
+"Colt Cooper" (450, 6), "Winchester Sam" (550, 12), "Pistolet Kate" (400, 3), "Fusil Sanchez"
+(400, 2), "Colt Doc" (550, 6), "Sarbacanne Mia" (300, 1).
+
 ## Patrol routes (WAYS chunk) - decoded
 
 Loaded by `DVHikingGuide.cpp`: `u32 1, u16 pathCount`, per path `u16 n`, per waypoint:

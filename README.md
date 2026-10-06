@@ -14,8 +14,9 @@ the original files from your phone's storage.
 | 2. Characters, animals and animated scenery on the map, depth masking | ✅ done |
 | 3. Walkable areas, pathfinding, tap to select / walk, double-tap to run, coloured minimap | ✅ done |
 | 4. Enemy AI: patrols, vision cones, suspicion, alarm, chase, shooting, searching | ✅ first version |
-| 5. Hero abilities (Cooper's colt and knife, ...), ladders/stairs, mission scripts | ⏳ next |
-| 6. Dialogues, sound, HUD, the full campaign | ⏳ |
+| 5. Weapons: every hero's own gun (range/ammo from weapons.dat), knife / punch / kick, reload, KO, bodies | ✅ first version |
+| 6. Special abilities (dynamite, sniper, mirror, ...), ladders/stairs, mission scripts | ⏳ next |
+| 7. Dialogues, sound, HUD, the full campaign | ⏳ |
 
 ## Install on your phone
 
@@ -29,6 +30,7 @@ the original files from your phone's storage.
 Controls: tap a hero to select, tap the ground to walk, double-tap to run, double-tap a hero to centre
 on them. Drag to scroll, pinch to zoom, tap or drag the minimap to jump (tap a green dot to select
 that hero). Stance button (bottom right): lie down / stand up; moving while down crawls.
+Gun / melee buttons: tap one, then tap an enemy (the hero walks into range first).
 Long-press an enemy to show their field of view (long-press the ground to hide). Android back button
 returns to the level list.
 

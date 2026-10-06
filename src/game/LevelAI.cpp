@@ -160,6 +160,27 @@ void Level::updatePatrol(Instance& e, float dt) {
     }
 }
 
+// Puts an enemy on alert towards a position (heard a shot, was shot at, was shouted at).
+void Level::alertTo(Instance& e, int heroIdx, float x, float y) {
+    if (e.ai == Instance::AI::Dead || e.ai == Instance::AI::KO || e.el.faction != Faction::Enemy) return;
+    if (e.ai == Instance::AI::Alert) { e.seenX = x; e.seenY = y; e.lostT = 0; return; }
+    e.ai = Instance::AI::Alert;
+    e.meter = 1.0f;
+    e.target = heroIdx;
+    e.seenX = x;
+    e.seenY = y;
+    e.lostT = 0;
+    e.markT = 2.5f;
+    e.path.clear();
+    e.drawn = false;
+    e.waitT = 0.3f + frand() * 0.6f;  // short reaction time
+}
+
+void Level::noise(float x, float y, float radius, int heroIdx) {
+    for (auto& o : instances_)
+        if (o.el.faction == Faction::Enemy && groundDist(x, y, o.x, o.y) < radius) alertTo(o, heroIdx, x, y);
+}
+
 void Level::raiseAlarm(Instance& e, int heroIdx, float x, float y) {
     const bool wasAlert = e.ai == Instance::AI::Alert;
     e.ai = Instance::AI::Alert;
@@ -176,20 +197,8 @@ void Level::raiseAlarm(Instance& e, int heroIdx, float x, float y) {
     playOnce(e, kAnimAlert);
     // shout: alert the enemies around
     for (auto& o : instances_) {
-        if (&o == &e || o.el.faction != Faction::Enemy || o.ai == Instance::AI::Dead) continue;
-        if (o.ai == Instance::AI::Alert) continue;
-        if (groundDist(e.x, e.y, o.x, o.y) < kShoutRadius) {
-            o.ai = Instance::AI::Alert;
-            o.meter = 1.0f;
-            o.target = heroIdx;
-            o.seenX = x;
-            o.seenY = y;
-            o.lostT = 0;
-            o.markT = 2.5f;
-            o.path.clear();
-            o.drawn = false;
-            o.waitT = 0.3f + frand() * 0.6f;  // short reaction time
-        }
+        if (&o == &e || o.ai == Instance::AI::Alert) continue;
+        if (groundDist(e.x, e.y, o.x, o.y) < kShoutRadius) alertTo(o, heroIdx, x, y);
     }
 }
 
@@ -220,6 +229,18 @@ void Level::shoot(Instance& e, Instance& h) {
 void Level::updateEnemy(Instance& e, int idx, float dt) {
     (void)idx;
     e.markT = std::max(0.0f, e.markT - dt);
+    if (e.ai == Instance::AI::KO) {  // out cold; wakes up confused and starts searching
+        e.koT -= dt;
+        if (e.koT <= 0 && e.transition < 0) {
+            e.holdLast = false;
+            e.ai = Instance::AI::Searching;
+            e.searchTurns = 5;
+            e.meter = 0.6f;
+            e.waitT = 0;
+            playOnce(e, 34);  // "Se relever" (get up)
+        }
+        return;
+    }
     // --- look for heroes (a few times per second) ---
     e.thinkT -= dt;
     int seen = -1;
@@ -247,6 +268,29 @@ void Level::updateEnemy(Instance& e, int idx, float dt) {
             e.lostT = 0;
         } else if (e.ai != Instance::AI::Alert) {
             e.meter = std::max(0.0f, e.meter - 0.18f * 0.12f);
+        }
+        // a dead or unconscious comrade in view: go and look, weapon ready
+        if (e.ai == Instance::AI::Calm || e.ai == Instance::AI::Suspicious) {
+            float fx, fy;
+            dirVector(e.dir, fx, fy);
+            const float range = viewRange(e);
+            for (auto& b : instances_) {
+                if (&b == &e || b.discovered || b.el.faction != Faction::Enemy) continue;
+                if (b.ai != Instance::AI::Dead && b.ai != Instance::AI::KO) continue;
+                float d = groundDist(e.x, e.y, b.x, b.y);
+                if (d > range || d < 1) continue;
+                float gx = (b.x - e.x) / d, gy = 2.0f * (b.y - e.y) / d;
+                if (fx * gx + fy * gy < std::cos(kFovHalf)) continue;
+                if (!lineOfSight(e.x, e.y, b.x, b.y, kHeightProne)) continue;
+                b.discovered = true;
+                e.ai = Instance::AI::Searching;
+                e.searchTurns = 8;
+                e.meter = 0.7f;
+                e.markT = 2.0f;
+                e.waitT = 0;
+                walkTo(e, b.x + 10, b.y + 6, true, false);
+                break;
+            }
         }
     }
 
@@ -340,6 +384,7 @@ void Level::updateAI(float dt) {
     for (size_t i = 0; i < instances_.size(); ++i) {
         Instance& in = instances_[i];
         if (in.ai == Instance::AI::None || in.ai == Instance::AI::Dead) continue;
+        if (in.el.faction == Faction::Hero) { updateHeroOrder(in, (int)i, dt); continue; }
         if (in.el.faction == Faction::Enemy) updateEnemy(in, (int)i, dt);
         else if (in.el.faction == Faction::Civilian && in.transition < 0) updatePatrol(in, dt);
     }
@@ -466,7 +511,7 @@ void Level::renderAI(SDL_Renderer* r, const Camera& cam, int sw, int sh) {
     (void)sw;
     (void)sh;
     for (const auto& in : instances_) {
-        if (in.el.faction == Faction::Enemy && in.ai != Instance::AI::Dead &&
+        if (in.el.faction == Faction::Enemy && in.ai != Instance::AI::Dead && in.ai != Instance::AI::KO &&
             (in.ai == Instance::AI::Suspicious || (in.ai == Instance::AI::Alert && in.markT > 0) ||
              in.ai == Instance::AI::Searching))
             drawMarker(r, cam, in);
