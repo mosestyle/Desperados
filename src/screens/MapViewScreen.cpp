@@ -4,6 +4,10 @@
 #include <cmath>
 
 #include "../App.h"
+#include "../audio/Audio.h"
+#include "../render/BitmapFont.h"
+
+static const Level::Action kActions[3] = {Level::Action::Gun, Level::Action::Melee, Level::Action::Throw};
 
 MapViewScreen::MapViewScreen(App& app, int number) : Screen(app), level_(number) {
     loaded_ = level.load(app.renderer(), number);
@@ -64,6 +68,22 @@ void MapViewScreen::jumpFromMinimap(float x, float y, bool animate) {
 
 void MapViewScreen::onGestures(const std::vector<Gesture>& gs) {
     if (!loaded_) return;
+    if (level.missionResult() != 0) {  // mission over: a tap goes back to the level list
+        if (resultT_ > 1.5f)
+            for (const auto& g : gs)
+                if (g.type == Gesture::Tap) { level.stopVoices(); app_.pop(); return; }
+        return;
+    }
+    if (level.userLocked()) {  // cutscene: the only control is "skip"
+        for (const auto& g : gs)
+            if (g.type == Gesture::Tap && inButton(skipButton(), g.x, g.y)) { skipping_ = true; level.stopVoices(); }
+        return;
+    }
+    for (const auto& g : gs)
+        if (g.type == Gesture::Tap && inButton(objectivesButton(), g.x, g.y) && !level.objectives().empty()) {
+            objectivesT_ = objectivesT_ > 0 ? 0 : 8.0f;
+            return;
+        }
     if (failedT_ > 2.0f) {  // mission failed: any tap goes back to the level list
         for (const auto& g : gs)
             if (g.type == Gesture::Tap) { app_.pop(); return; }
@@ -91,20 +111,22 @@ void MapViewScreen::onGestures(const std::vector<Gesture>& gs) {
             break;
         case Gesture::Tap: {
             bool buttonHit = false;
-            for (int slot = 1; slot <= 2; ++slot) {
-                Level::Action a = slot == 1 ? Level::Action::Gun : Level::Action::Melee;
-                if (level.selectedCan(a) && inButton(actionButton(slot), g.x, g.y)) {
+            int slot = 0;
+            for (Level::Action a : kActions) {
+                if (!level.selectedCan(a)) continue;
+                ++slot;
+                if (inButton(actionButton(slot), g.x, g.y)) {
                     mode_ = mode_ == a ? Level::Action::None : a;
                     buttonHit = true;
                 }
             }
             if (buttonHit) break;
             if (mode_ != Level::Action::None && !inMinimap(g.x, g.y) && !inButton(stanceButton(), g.x, g.y)) {
-                // targeting: tap an enemy to attack; tapping anything else cancels
+                // targeting: tap an enemy (or a person / object) to attack; tapping anything else cancels
                 const float wx = cam_.toWorldX(g.x), wy = cam_.toWorldY(g.y);
-                int enemy = level.pickEnemy(wx, wy, 16.0f * app_.uiScale() / cam_.zoom + 4.0f);
-                if (enemy >= 0 && level.orderAttack(mode_, enemy)) {
-                    if (mode_ == Level::Action::Melee) mode_ = Level::Action::None;
+                int target = level.pickTarget(wx, wy, 16.0f * app_.uiScale() / cam_.zoom + 4.0f);
+                if (target >= 0 && level.orderAttack(mode_, target)) {
+                    if (mode_ != Level::Action::Gun) mode_ = Level::Action::None;
                     break;
                 }
                 int hero = level.pickHero(wx, wy, 14.0f * app_.uiScale() / cam_.zoom + 4.0f);
@@ -139,7 +161,7 @@ void MapViewScreen::onGestures(const std::vector<Gesture>& gs) {
         }
         case Gesture::DoubleTap: {
             if (inMinimap(g.x, g.y) || inButton(stanceButton(), g.x, g.y)) break;
-            if (inButton(actionButton(1), g.x, g.y) || inButton(actionButton(2), g.x, g.y)) break;
+            if (inButton(actionButton(1), g.x, g.y) || inButton(actionButton(2), g.x, g.y) || inButton(actionButton(3), g.x, g.y)) break;
             if (mode_ != Level::Action::None) break;
             const float wx = cam_.toWorldX(g.x), wy = cam_.toWorldY(g.y);
             int hero = level.pickHero(wx, wy, 14.0f * app_.uiScale() / cam_.zoom + 4.0f);
@@ -216,8 +238,102 @@ bool MapViewScreen::selectHeroOnMinimap(float x, float y) {
 
 void MapViewScreen::update(float dt) {
     cam_.update(dt);
-    if (loaded_) level.update(dt);
-    if (loaded_ && level.allHeroesDead()) failedT_ += dt;
+    if (!loaded_) return;
+    level.setViewCenter(cam_.cx, cam_.cy);
+    level.setViewSize(cam_.screenW / cam_.zoom, cam_.screenH / cam_.zoom);
+    if (level.missionResult() != 0) { resultT_ += dt; return; }
+    if (!level.userLocked()) skipping_ = false;
+    const int steps = skipping_ ? 10 : 1;  // fast-forward a cutscene the player skips
+    for (int i = 0; i < steps; ++i) {
+        level.update(dt);
+        if (skipping_) level.stopVoices();
+        if (!level.userLocked() && i > 0) { skipping_ = false; break; }
+    }
+    float x, y;
+    if (level.scriptCamera(x, y)) {  // the script directs the camera (intros, cutscenes)
+        cam_.cx = x;
+        cam_.cy = y;
+        cam_.vx = cam_.vy = 0;
+        cam_.flying = false;
+        cam_.clamp();
+    }
+    objectivesT_ = std::max(0.0f, objectivesT_ - dt);
+    if (const char* t = SDL_getenv("DESP_TESTATTACK")) {  // "elem,action[;elem,action...]" once control is given
+        static size_t step = 0;
+        static float wait = 0;
+        std::vector<std::pair<int, int>> list;
+        for (const char* p = t; *p;) {
+            int e = 0, a = 1;
+            if (SDL_sscanf(p, "%d,%d", &e, &a) == 2) list.push_back({e, a});
+            while (*p && *p != ';') ++p;
+            if (*p) ++p;
+        }
+        wait -= dt;
+        if (!level.userLocked() && wait <= 0 && step < list.size()) {
+            level.debugAttackElement(list[step].first, (Level::Action)list[step].second);
+            ++step;
+            wait = 8.0f;
+        }
+    }
+    if (level.allHeroesDead()) failedT_ += dt;
+}
+
+SDL_FRect MapViewScreen::skipButton() const {
+    float s = std::min(app_.height() * 0.14f, app_.width() * 0.09f), m = app_.height() * 0.03f;
+    return {app_.width() - s - m, app_.height() - s - m, s, s};
+}
+
+SDL_FRect MapViewScreen::objectivesButton() const {
+    float s = std::min(app_.height() * 0.13f, app_.width() * 0.08f), m = app_.height() * 0.03f;
+    return {m, m, s, s};
+}
+
+void MapViewScreen::drawObjectives(SDL_Renderer* r) {
+    BitmapFont& f = uiFont();
+    if (!f.ready()) return;
+    const float ui = app_.uiScale(), scale = std::max(1.0f, std::round(ui * 1.6f * 2) / 2), lh = f.height() * scale * 1.1f;
+    const float w = app_.width() * 0.6f, x = (app_.width() - w) / 2, pad = 14 * ui;
+    std::vector<std::pair<std::string, bool>> rows;
+    for (const auto& o : level.objectives())
+        for (const auto& line : f.wrap(level.objectiveText(o.first), w - pad * 2 - 30 * ui, scale)) rows.push_back({line, o.second});
+    float h = (rows.size() + 1.5f) * lh + pad * 2, y = app_.height() * 0.12f;
+    SDL_FRect bg{x, y, w, h};
+    SDL_SetRenderDrawColor(r, 18, 11, 6, 225);
+    SDL_RenderFillRectF(r, &bg);
+    SDL_SetRenderDrawColor(r, 150, 110, 60, 230);
+    SDL_RenderDrawRectF(r, &bg);
+    f.draw(r, "Mission objectives", x + pad, y + pad, scale, {255, 200, 120, 255});
+    float ty = y + pad + lh * 1.5f;
+    for (const auto& row : rows) {
+        f.draw(r, row.first, x + pad + 30 * ui, ty, scale, row.second ? SDL_Color{150, 140, 120, 255} : SDL_Color{255, 245, 220, 255});
+        ty += lh;
+    }
+}
+
+void MapViewScreen::drawResult(SDL_Renderer* r) {
+    const bool won = level.missionResult() == 1;
+    Uint8 a = (Uint8)std::min(170.0f, resultT_ * 120.0f);
+    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+    if (won) SDL_SetRenderDrawColor(r, 0, 0, 0, a);
+    else SDL_SetRenderDrawColor(r, 90, 0, 0, a);
+    SDL_Rect all{0, 0, app_.width(), app_.height()};
+    SDL_RenderFillRect(r, &all);
+    BitmapFont& f = uiFont();
+    if (!f.ready()) return;
+    const float ui = app_.uiScale(), big = std::max(2.0f, std::round(ui * 3.0f)), small = std::max(1.0f, std::round(ui * 1.6f * 2) / 2);
+    std::string title = won ? "MISSION SUCCESSFUL!" : "MISSION FAILED";
+    float y = app_.height() * 0.38f;
+    f.draw(r, title, (app_.width() - f.width(title, big)) / 2, y, big, {255, 210, 120, 255});
+    y += f.height() * big * 1.4f;
+    std::string text = won ? "" : level.missionResultText();
+    for (const auto& line : f.wrap(text, app_.width() * 0.7f, small)) {
+        f.draw(r, line, (app_.width() - f.width(line, small)) / 2, y, small, {255, 245, 220, 255});
+        y += f.height() * small * 1.1f;
+    }
+    if (resultT_ > 1.5f) {
+        std::string t = "Tap to continue";
+        f.draw(r, t, (app_.width() - f.width(t, small)) / 2, app_.height() * 0.8f, small, {200, 190, 170, 255});
+    }
 }
 
 void MapViewScreen::render(SDL_Renderer* r) {
@@ -235,6 +351,32 @@ void MapViewScreen::render(SDL_Renderer* r) {
         return;
     }
 
+    level.renderOverlay(r, app_.width(), app_.height(), app_.uiScale());
+    if (level.missionResult() != 0) { drawResult(r); return; }
+    if (level.userLocked()) {  // cutscene: just the skip button
+        SDL_FRect b = skipButton();
+        drawButton(r, b, skipping_);
+        SDL_SetRenderDrawColor(r, 240, 220, 170, 255);
+        float cx = b.x + b.w / 2, cy = b.y + b.h / 2, s = b.w * 0.16f;
+        for (int k = 0; k < 2; ++k) {  // fast-forward symbol
+            float ox = cx - s * 1.1f + k * s * 1.1f;
+            SDL_Vertex v[3] = {{{ox - s * 0.5f, cy - s}, {240, 220, 170, 255}, {0, 0}},
+                               {{ox - s * 0.5f, cy + s}, {240, 220, 170, 255}, {0, 0}},
+                               {{ox + s * 0.7f, cy}, {240, 220, 170, 255}, {0, 0}}};
+            SDL_RenderGeometry(r, nullptr, v, 3, nullptr, 0);
+        }
+        return;
+    }
+    if (!level.objectives().empty()) {  // objectives button (a scroll with lines)
+        SDL_FRect b = objectivesButton();
+        drawButton(r, b, objectivesT_ > 0);
+        SDL_SetRenderDrawColor(r, 240, 220, 170, 255);
+        for (int k = 0; k < 3; ++k) {
+            SDL_FRect l{b.x + b.w * 0.3f, b.y + b.h * (0.33f + k * 0.15f), b.w * 0.4f, std::max(2.0f, b.h * 0.05f)};
+            SDL_RenderFillRectF(r, &l);
+        }
+        if (objectivesT_ > 0) drawObjectives(r);
+    }
     if (mode_ != Level::Action::None && !level.selectedCan(mode_)) mode_ = Level::Action::None;
     if (mode_ == Level::Action::Gun) level.drawRange(r, cam_, level.selectedGunRange(), {255, 220, 90, 170});
 
@@ -246,10 +388,10 @@ void MapViewScreen::render(SDL_Renderer* r) {
         float pad = b.w * 0.2f;
         level.drawSelectedFrame(r, {b.x + pad, b.y + pad, b.w - 2 * pad, b.h - 2 * pad}, prone ? 0 : 7, 6);
         // action buttons: the hero's own shooting / melee animation as the icon
-        for (int slot = 1; slot <= 2; ++slot) {
-            Level::Action a = slot == 1 ? Level::Action::Gun : Level::Action::Melee;
+        int slot = 0;
+        for (Level::Action a : kActions) {
             if (!level.selectedCan(a)) continue;
-            SDL_FRect ab = actionButton(slot);
+            SDL_FRect ab = actionButton(++slot);
             drawButton(r, ab, mode_ == a);
             level.drawSelectedFrame(r, {ab.x + pad, ab.y + pad, ab.w - 2 * pad, ab.h - 2 * pad},
                                     level.selectedActionAnim(a), 6, 1);

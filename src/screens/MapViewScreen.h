@@ -36,8 +36,16 @@ private:
     bool inButton(const SDL_FRect& b, float x, float y) const;
     void drawButton(SDL_Renderer* r, const SDL_FRect& b, bool active);
 
+    SDL_FRect skipButton() const;
+    SDL_FRect objectivesButton() const;
+    void drawObjectives(SDL_Renderer* r);
+    void drawResult(SDL_Renderer* r);
+
     int level_;
     bool loaded_ = false;
+    bool skipping_ = false;       // fast-forwarding a cutscene
+    float objectivesT_ = 0;       // objectives panel shown
+    float resultT_ = 0;
     Level level;
     SDL_Texture* miniTex_ = nullptr;
     Camera cam_;

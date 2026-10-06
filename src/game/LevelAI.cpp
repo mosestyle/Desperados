@@ -83,7 +83,7 @@ bool Level::lineOfSight(float ax, float ay, float bx, float by, float targetHeig
 }
 
 bool Level::canSee(const Instance& e, const Instance& h, bool& nearZone, float& dist) const {
-    if (h.ai == Instance::AI::Dead || h.floor != e.floor) return false;
+    if (h.ai == Instance::AI::Dead || h.floor != e.floor || h.hidden || e.hidden) return false;
     // Until the mission scripts run, a hero still at its scripted start position is ignored
     // (several missions start next to enemies in a cutscene).
     if (h.untouched) return false;
@@ -120,6 +120,11 @@ void Level::beginWaypoint(Instance& e) {
     e.cmdIdx = 0;
     e.waitT = 0;
     const Waypoint& wp = paths_[e.pathId][e.wpIdx];
+    if (!wp.script.empty()) {  // scripted waypoint: the mission script decides what happens here
+        auto it = waypointScript_.find({e.pathId, e.wpIdx});
+        if (it != waypointScript_.end()) callScript(it->second, "ReachPoint", {actorHandle(e)});
+        return;
+    }
     if (!wp.options.empty()) {
         int total = 0;
         for (const auto& o : wp.options) total += std::max(0, o.probability);
@@ -132,7 +137,12 @@ void Level::beginWaypoint(Instance& e) {
 }
 
 void Level::updatePatrol(Instance& e, float dt) {
-    if (e.pathId < 0) return;
+    if (e.pathId < 0) {
+        if (!e.hasPost || !e.path.empty()) return;
+        if (groundDist(e.x, e.y, e.postX, e.postY) > 6) { walkTo(e, e.postX, e.postY, false, false); return; }
+        if (e.postDir >= 0 && e.dir != e.postDir) setAnim(e, kAnimIdle, e.postDir);
+        return;
+    }
     const PatrolPath& p = paths_[e.pathId];
     if (!e.atWaypoint) {
         if (e.path.empty()) {
@@ -383,7 +393,10 @@ void Level::updateEnemy(Instance& e, int idx, float dt) {
 void Level::updateAI(float dt) {
     for (size_t i = 0; i < instances_.size(); ++i) {
         Instance& in = instances_[i];
-        if (in.ai == Instance::AI::None || in.ai == Instance::AI::Dead) continue;
+        if (in.ai == Instance::AI::None || in.ai == Instance::AI::Dead || in.hidden) continue;
+        // the mission script is driving this actor (cutscene, locked AI)
+        if (in.el.faction != Faction::Hero && (in.aiLocked || in.seqBusy > 0)) continue;
+        if (in.el.faction == Faction::Hero && in.seqBusy > 0) continue;
         if (in.el.faction == Faction::Hero) { updateHeroOrder(in, (int)i, dt); continue; }
         if (in.el.faction == Faction::Enemy) updateEnemy(in, (int)i, dt);
         else if (in.el.faction == Faction::Civilian && in.transition < 0) updatePatrol(in, dt);
@@ -397,7 +410,7 @@ int Level::pickEnemy(float wx, float wy, float slack) const {
     float bestD = 1e30f;
     for (size_t i = 0; i < instances_.size(); ++i) {
         const auto& in = instances_[i];
-        if (in.el.faction != Faction::Enemy || in.ai == Instance::AI::Dead) continue;
+        if (in.el.faction != Faction::Enemy || in.ai == Instance::AI::Dead || in.hidden) continue;
         const SDL_Rect& w = in.world;
         if (wx < w.x - slack || wx > w.x + w.w + slack || wy < w.y - slack || wy > w.y + w.h + slack) continue;
         float d = (wx - in.x) * (wx - in.x) + (wy - (in.y - w.h * 0.4f)) * (wy - (in.y - w.h * 0.4f));
@@ -431,7 +444,7 @@ void Level::hideAllCones() {
 bool Level::allHeroesDead() const {
     bool anyHero = false;
     for (const auto& in : instances_) {
-        if (in.el.faction != Faction::Hero) continue;
+        if (in.el.faction != Faction::Hero || in.hidden) continue;
         anyHero = true;
         if (in.ai != Instance::AI::Dead) return false;
     }
@@ -511,6 +524,7 @@ void Level::renderAI(SDL_Renderer* r, const Camera& cam, int sw, int sh) {
     (void)sw;
     (void)sh;
     for (const auto& in : instances_) {
+        if (in.hidden) continue;
         if (in.el.faction == Faction::Enemy && in.ai != Instance::AI::Dead && in.ai != Instance::AI::KO &&
             (in.ai == Instance::AI::Suspicious || (in.ai == Instance::AI::Alert && in.markT > 0) ||
              in.ai == Instance::AI::Searching))

@@ -21,6 +21,7 @@ struct AppOptions {
     float heroX = -1, heroY = -1; // --hero x,y: place the selected hero (debug)
     std::string shotSeries;    // --series prefix: screenshots every 60 frames
     float viewX = -1, viewY = -1, viewZoom = 0;
+    bool fixedStep = false;    // --fixed: every frame advances 1/30 s (deterministic tests)
 };
 
 class App {

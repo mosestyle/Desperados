@@ -32,6 +32,8 @@ struct LevelElement {
     // NPCs: profile id (characters.dat), patrol path index (-1 = none), script class, start animation
     int profile = 0, path = -1, startAnim = -1;
     std::string script;
+    size_t offset = 0;  // where the element's file name starts in the ELEM chunk
+    int boxX1 = 0, boxY1 = 0;  // scripted objects: bottom-right of the hit box (top-left = x,y)
 };
 
 // Known sprite file stems (lower case, without .dvf) per folder.

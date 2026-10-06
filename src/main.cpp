@@ -21,6 +21,7 @@ int main(int argc, char* argv[]) {
         else if (a == "--navdump") opt.navDump = next("nav.bmp");
         else if (a == "--shotframe") opt.shotFrame = std::atoi(next("40").c_str());
         else if (a == "--cones") opt.cones = true;
+        else if (a == "--fixed") opt.fixedStep = true;
         else if (a == "--hero") { std::string v = next("0,0"); SDL_sscanf(v.c_str(), "%f,%f", &opt.heroX, &opt.heroY); }
         else if (a == "--view") {  // x,y,zoom
             std::string v = next("0,0,1");

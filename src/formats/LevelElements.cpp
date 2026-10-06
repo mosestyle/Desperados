@@ -55,6 +55,7 @@ std::vector<LevelElement> scanElements(const uint8_t* d, size_t size, const Spri
         if ((!isChar && !isAnim) || !readName(d, size, afterFile, set, afterSet)) { ++o; continue; }
 
         LevelElement e;
+        e.offset = o;
         e.file = file;
         e.set = set;
         if (o >= 2) { e.sub = d[o - 2]; e.cls = d[o - 1]; }
@@ -80,6 +81,11 @@ std::vector<LevelElement> scanElements(const uint8_t* d, size_t size, const Spri
             e.x = r.s16();
             e.y = r.s16();
             e.z = r.s16();
+            if (e.cls == 8) {  // scripted object: 3 flag bytes, then the bottom-right of its hit box
+                r.skip(3);
+                e.boxX1 = r.s16();
+                e.boxY1 = r.s16();
+            }
             if (!r.ok) break;
             out.push_back(e);
             o = afterSet;

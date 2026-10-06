@@ -43,7 +43,12 @@ set(SOURCES
     src/main.cpp
     src/App.cpp
     src/core/FileSystem.cpp
+    src/audio/Audio.cpp
     src/formats/Decompress.cpp
+    src/formats/Dialogues.cpp
+    src/formats/ScriptFile.cpp
+    src/formats/ScriptZones.cpp
+    src/formats/TextResource.cpp
     src/formats/Image16.cpp
     src/formats/LevelFile.cpp
     src/formats/LevelElements.cpp
@@ -57,7 +62,10 @@ set(SOURCES
     src/game/Level.cpp
     src/game/LevelAI.cpp
     src/game/LevelCombat.cpp
+    src/game/LevelScript.cpp
+    src/game/ScriptVM.cpp
     src/game/NavGrid.cpp
+    src/render/BitmapFont.cpp
     src/render/SpriteAtlas.cpp
     src/input/TouchInput.cpp
     src/render/Textures.cpp

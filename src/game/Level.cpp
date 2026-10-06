@@ -23,7 +23,11 @@ static int directionOf(float dx, float dy) {
     return (d % 16 + 16) % 16;
 }
 
-Level::~Level() { releaseTextures(); }
+Level::~Level() {
+    releaseTextures();
+    stopMusic();
+    stopVoices();
+}
 
 const SpriteFile* Level::sprite(const std::string& folder, const std::string& file) {
     const std::string key = folder + "/" + lower(file);
@@ -75,10 +79,20 @@ bool Level::load(SDL_Renderer* r, int number) {
         SpriteIndex index;
         index.build();
         if (const uint8_t* e = file_.chunkData("ELEM", &n)) {
-            for (auto& el : scanElements(e, n, index)) {
-                if (el.kind != LevelElement::Actor && el.kind != LevelElement::Scenery) continue;
+            auto elements = scanElements(e, n, index);
+            elemInst_.assign(elements.size(), -1);
+            for (size_t ei = 0; ei < elements.size(); ++ei) {
+                const LevelElement& el = elements[ei];
+                elemOffsets_.push_back(el.offset);
+                elemKind_.push_back(el.kind);
+                elemCls_.push_back(el.cls);
+                const bool target = el.kind == LevelElement::Dummy && el.cls == 8;  // invisible script target
+                if (el.kind != LevelElement::Actor && el.kind != LevelElement::Scenery && !target) continue;
                 Instance in;
                 in.el = el;
+                in.elem = (int)ei;
+                if (target) { in.el.kind = LevelElement::Scenery; in.invisible = true; }
+                if (el.cls == 8 && el.boxX1 > el.x && el.boxY1 > el.y) in.box = {el.x, el.y, el.boxX1 - el.x, el.boxY1 - el.y};
                 in.file = sprite(el.folder, el.file);
                 if (!in.file) continue;
                 in.set = in.file->set(el.set);
@@ -103,6 +117,7 @@ bool Level::load(SDL_Renderer* r, int number) {
                                  (int)in.rec->entries.size());
                 in.ticks = (float)(((el.x + el.y) % 7 + 7) % 7);
                 updateFrameRect(in);
+                elemInst_[ei] = (int)instances_.size();
                 instances_.push_back(std::move(in));
             }
         }
@@ -111,6 +126,7 @@ bool Level::load(SDL_Renderer* r, int number) {
     initAI();
     initHeroes();
     selected_ = firstHero();
+    initScripts();
     SDL_Log("Level %d: %dx%d, %d elements (%d actors), %d sprite files, %d masks, %d layers, %d paths, %d sight "
             "obstacles, loaded in %u ms", number, background_.w, background_.h, (int)instances_.size(), actorCount(),
             (int)sprites_.size(), (int)masks_.size(), (int)layers_.size(), (int)paths_.size(), (int)sight_.size(),
@@ -129,7 +145,7 @@ int Level::firstHero() const {
     int any = -1;
     for (size_t i = 0; i < instances_.size(); ++i) {
         const auto& in = instances_[i];
-        if (in.el.faction != Faction::Hero || in.ai == Instance::AI::Dead) continue;
+        if (in.el.faction != Faction::Hero || in.ai == Instance::AI::Dead || in.hidden || in.deactivated) continue;
         if (in.x >= 0 && in.y >= 0 && in.x < width() && in.y < height()) return (int)i;
         if (any < 0) any = (int)i;
     }
@@ -140,7 +156,7 @@ void Level::actorDots(std::vector<ActorDot>& out) const {
     out.clear();
     for (size_t i = 0; i < instances_.size(); ++i) {
         const auto& in = instances_[i];
-        if (in.el.kind != LevelElement::Actor || in.el.faction == Faction::None) continue;
+        if (in.el.kind != LevelElement::Actor || in.el.faction == Faction::None || in.hidden) continue;
         out.push_back({in.x, in.y, in.el.faction, (int)i == selected_});
     }
 }
@@ -194,6 +210,11 @@ void Level::updateFrameRect(Instance& in) {
         in.sortY = in.el.y + in.el.z;
         in.x = (float)(in.world.x + w / 2);
         in.y = (float)in.sortY;
+        if (in.box.w > 0) {  // scripted object: aim at its hit box, stand below it
+            if (in.invisible) in.world = in.box;
+            in.x = in.box.x + in.box.w * 0.5f;
+            in.y = (float)std::max(in.box.y + in.box.h, in.sortY);
+        }
     }
 }
 
@@ -289,10 +310,12 @@ void Level::updateMovement(Instance& in, float dt) {
 
 void Level::update(float dt) {
     time_ += dt;
+    updateScripts(dt);
     updateAI(dt);
     targetFade_ = std::max(0.0f, targetFade_ - dt * 1.2f);
     const float ticks = dt * kTicksPerSecond;
     for (auto& in : instances_) {
+        if (in.hidden) continue;
         if (in.transition >= 0) {  // get down / stand up: play once, then continue
             const auto& entries = in.rec->entries;
             in.ticks += ticks;
@@ -341,7 +364,7 @@ int Level::pickHero(float wx, float wy, float slack) const {
     float bestD = 1e30f;
     for (size_t i = 0; i < instances_.size(); ++i) {
         const auto& in = instances_[i];
-        if (in.el.faction != Faction::Hero || in.ai == Instance::AI::Dead) continue;
+        if (in.el.faction != Faction::Hero || in.ai == Instance::AI::Dead || in.hidden || in.deactivated) continue;
         const SDL_Rect& w = in.world;
         if (wx < w.x - slack || wx > w.x + w.w + slack || wy < w.y - slack || wy > w.y + w.h + slack) continue;
         float cx = in.x, cy = in.y - w.h * 0.4f;  // roughly the body centre
@@ -359,7 +382,7 @@ bool Level::selectedPosition(float& x, float& y) const {
 }
 
 bool Level::moveSelected(float wx, float wy, bool run) {
-    if (selected_ < 0 || selected_ >= (int)instances_.size()) return false;
+    if (selected_ < 0 || selected_ >= (int)instances_.size() || userLocked()) return false;
     Instance& in = instances_[selected_];
     if (in.floor >= (int)nav_.size() || in.ai == Instance::AI::Dead) return false;
     in.untouched = false;
@@ -432,7 +455,7 @@ void Level::render(SDL_Renderer* r, const Camera& cam, int sw, int sh) {
         float s = 6 + 10 * (1 - targetFade_);
         drawEllipse(r, cam, target_.x, target_.y, s, s * 0.5f, {120, 255, 120, a});
     }
-    if (selected_ >= 0 && selected_ < (int)instances_.size()) {
+    if (selected_ >= 0 && selected_ < (int)instances_.size() && !instances_[selected_].hidden && !userLocked()) {
         const auto& in = instances_[selected_];
         float pulse = 0.85f + 0.15f * std::sin(time_ * 5);
         drawEllipse(r, cam, in.x, in.y, 15 * pulse, 7.5f * pulse, {90, 255, 90, 230});
@@ -440,7 +463,7 @@ void Level::render(SDL_Renderer* r, const Camera& cam, int sw, int sh) {
 
     // enemy fields of view lie on the ground, under everything
     for (const auto& in : instances_)
-        if (in.ai != Instance::AI::None && in.ai != Instance::AI::Dead && in.ai != Instance::AI::KO &&
+        if (in.ai != Instance::AI::None && in.ai != Instance::AI::Dead && in.ai != Instance::AI::KO && !in.hidden &&
             in.el.faction == Faction::Enemy &&
             (in.showCone || in.ai == Instance::AI::Suspicious || in.ai == Instance::AI::Alert))
             drawCone(r, cam, in);
@@ -454,6 +477,7 @@ void Level::render(SDL_Renderer* r, const Camera& cam, int sw, int sh) {
     const float vx0 = cam.toWorldX(0), vy0 = cam.toWorldY(0), vx1 = cam.toWorldX((float)sw), vy1 = cam.toWorldY((float)sh);
     for (int idx : drawOrder_) {
         Instance& in = instances_[idx];
+        if (in.hidden || in.invisible) continue;
         const SDL_Rect& w = in.world;
         if (w.w <= 0 || w.x > vx1 || w.y > vy1 || w.x + w.w < vx0 || w.y + w.h < vy0) continue;
         const SpriteAtlas::Slot* slot = atlas_.get(*in.file, in.rec->entries[in.entry].frame);

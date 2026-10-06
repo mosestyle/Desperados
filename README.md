@@ -15,8 +15,9 @@ the original files from your phone's storage.
 | 3. Walkable areas, pathfinding, tap to select / walk, double-tap to run, coloured minimap | ✅ done |
 | 4. Enemy AI: patrols, vision cones, suspicion, alarm, chase, shooting, searching | ✅ first version |
 | 5. Weapons: every hero's own gun (range/ammo from weapons.dat), knife / punch / kick, reload, KO, bodies | ✅ first version |
-| 6. Special abilities (dynamite, sniper, mirror, ...), ladders/stairs, mission scripts | ⏳ next |
-| 7. Dialogues, sound, HUD, the full campaign | ⏳ |
+| 6. The original mission scripts: intros and cutscenes, hero start positions, voiced dialogues with subtitles, objectives, tutorial hints, victory/defeat, dynamic music | ✅ first version |
+| 7. Climbing, ladders, stairs, buildings; special abilities (dynamite, sniper, mirror, ...); horses | ⏳ next |
+| 8. Ambient sounds, effects, campaign flow, cinematics | ⏳ |
 
 ## Install on your phone
 

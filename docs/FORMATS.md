@@ -54,7 +54,7 @@ Sequence of chunks `char tag[4]; u32 length; u8 body[length]`. Order in every le
 | `WAYS` | patrol routes with waypoint orders (see below) | **decoded** |
 | `ELEM` | placed elements: characters, objects, animations (`DVElement*`) | positions decoded |
 | `FXBK` | effect bank | todo |
-| `MSIC` | music tracks (`green01.wav`, ...) | todo |
+| `MSIC` | music: `u32 1`, 3 x (`u16 present, u16 len, name`) = calm / tense / alarm track in `data/musics` | **decoded** |
 | `SND ` | ambient sound sources | todo |
 | `PAT ` | patches (contains JPEG data) | todo |
 | `BOND` | boundaries | todo |
@@ -62,10 +62,10 @@ Sequence of chunks `char tag[4]; u32 length; u8 body[length]`. Order in every le
 | `LIFT` | lifts / ladders | todo |
 | `AI  ` | AI points | todo |
 | `BUIL` | buildings (enter/exit, roofs) | todo |
-| `SCRP` | script zones (`DVSectorScript`) | todo |
+| `SCRP` | script locations and sectors (see below) | **decoded** |
 | `JUMP` | jump lines | todo |
 | `CART` | carts / vehicles, cutscene paths | todo |
-| `DLGS` | dialogues | todo |
+| `DLGS` | dialogues (see below) | **decoded** |
 
 ## Sprites (.dvf) - decoded
 
@@ -198,3 +198,66 @@ AI (`DVArtificialIntelligence`, `DVArtificialMalignity`, `DVArtificialBonhomie`,
 `DVPsychoanalyst`), map (`DVSector*`, `DVLine*`, `DVPoint*`, `DVFastFindGrid`),
 actors (`DVElementActorPC/NPC/Villain/Civilian/Horse/Animal`, `DVCooper`, `DVDoc`, `DVSanchez`, ...),
 orders (`DVOrder`, `DVSequence*`), scripts (`DVScript`, `VMCore`).
+
+
+## Mission scripts (.scb) - decoded
+
+Compiled from the designers' `script.scs` files. Text header lines, then binary code:
+
+```
+version 1.00, debug 0
+nbOfClasses N
+per class:
+  fileName <path> , className <name>          (StartUp = the level; others belong to NPCs,
+  nbOfVariables n, sizeOfVariables bytes        objects, waypoints or sectors, by name)
+  nbOfFunctions n
+  per function: functionName <name> , address <quad>, nbOfParams n, sizeOfRetVal 4, sizeOfParams b
+                functionParameters / (blank) / " sizeOfVolatile n, sizeOfTempor n"
+  nbOfQuads n
+  n quads of 10 bytes: u8 opcode, 8 operand bytes, '~'
+```
+
+Operands: u16 symbols (bits 15-14 = storage: 0 global, 1 class variable, 2 volatile local,
+3 temporary; bits 13-0 = byte offset) or u32 values. Opcodes (VMCore::Run):
+`1` nop, `2` push arg, `3` enter (volatile, temporary sizes), `4` end, `5` call, `6` return,
+`7` return value, `8` get parameter, `9` set parameter, `10` get return value, `11` native argument,
+`12` native call (u32 number 0-199), `13` native return value, `14` goto, `15`/`16` if (not) zero goto,
+`17`/`18` move, `19`/`20` load int / float immediate, `21`/`22` negate, `23`/`24` float<->int,
+`25-28` int + - * /, `29-32` float + - * /, `33-38` int <= < >= > != ==, `39-44` the same for floats.
+
+Event functions called by the engine: `Initialize`, `Briefing`, `HourGlass(seconds)` (every second),
+`CheckVictoryCondition` (every 3 s; returns 1 = mission accomplished, 2 = failed),
+`FilterEvent(self, event)` (custom events), `ReachPoint(actor)`, `EnterZone(actor)`, `ExitZone(actor)`,
+`Shooted/Stabbed/Hit/Dagger/Clicked(actor)` on objects, `AIStateChange`, `ActionChange`.
+Cutscenes are recorded with `Start ... Then ... Thanx`: actions between two `Then` run together,
+the groups one after the other.
+
+## SCRP chunk (script locations) - decoded
+
+```
+u32 version (1), u16 count, per item:
+  u16 n, n * (u16 x, u16 y)        1 point = location, more = sector polygon
+  u16 flag, u16 value              (not fully known)
+  u8 hasScript [, u16 len, class name]
+```
+
+## DLGS chunk (dialogues) - decoded
+
+```
+u32 version (4), u32 textId, u32 waveId (resources in texts.res), u32 dialogueCount
+per dialogue: u32 lines, lines * (u32 speaker, u32 textIndex, u32 waveIndex)
+then u32 hintTextId, u32 n, n * u32         (tutorial hints)
+     u32 objectiveTextId, u32 n, n * u32    (objectives, "sentences")
+     u32 defeatTextId, u32 n, n * u32, u32 m, m * u32
+```
+Speakers 0-5 are Cooper, Sam, Doc, Kate, Sanchez, Mia.
+
+## texts.res - decoded
+
+`SRES`, u32 version, u32 count; per resource tag[4], u32 id, u32 ?, u16 n, n entries
+(`TEXT`: u16 length + UTF-16 characters, `WAVE`: u16 length + ASCII path of the voice file).
+
+## Fonts (.fnt) - decoded
+
+`SBFONT`, u32 version, name[36], u32 type, u32 height, u32, u32, u32 glyphCount, [u32 if version >= 0x200],
+glyphCount * (u16 char, u32 x, u32 width, s32 before, s32 after), then one 16-bit image with all glyphs.

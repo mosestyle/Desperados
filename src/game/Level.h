@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include "../formats/Dialogues.h"
 #include "../formats/Image16.h"
 #include "../formats/LevelElements.h"
 #include "../formats/LevelFile.h"
@@ -15,6 +16,8 @@
 #include "../formats/MotionAreas.h"
 #include "../formats/Paths.h"
 #include "../formats/Profiles.h"
+#include "../formats/ScriptFile.h"
+#include "../formats/ScriptZones.h"
 #include "../formats/SightObstacles.h"
 #include "../formats/SpriteFile.h"
 #include "../formats/Weapons.h"
@@ -22,13 +25,15 @@
 #include "../render/Textures.h"
 #include "Camera.h"
 #include "NavGrid.h"
+#include "ScriptVM.h"
 
-class Level {
+class Level : public ScriptHost {
 public:
     struct ActorDot { float x, y; Faction faction; bool selected; };
-    enum class Action { None, Gun, Melee };
+    enum class Action { None, Gun, Melee, Throw };
 
     ~Level();
+    void stopMusic();
     bool load(SDL_Renderer* r, int number);
     void update(float dt);
     void render(SDL_Renderer* r, const Camera& cam, int screenW, int screenH);
@@ -60,7 +65,8 @@ public:
     // --- hero actions (LevelCombat.cpp) ---
     bool selectedCan(Action a) const;
     int selectedActionAnim(Action a) const;    // animation used as the button icon
-    bool orderAttack(Action a, int enemyIdx);  // selected hero attacks an enemy (walks into range first)
+    bool orderAttack(Action a, int targetIdx);  // selected hero attacks (walks into range first)
+    int pickTarget(float wx, float wy, float slack) const;  // enemy, civilian or scripted object
     float selectedGunRange() const;
     int selectedAmmo(int* maxAmmo = nullptr) const;
     void drawRange(SDL_Renderer* r, const Camera& cam, float range, SDL_Color c);
@@ -76,8 +82,26 @@ public:
     void debugPlaceSelected(float x, float y);
     bool debugNearestEnemy(float x, float y, float& ex, float& ey, int skip = 0) const;
     void debugState() const;
+    bool debugAttackElement(int elem, Action a);  // test helper: selected hero attacks element `elem`
     bool allHeroesDead() const;
     int alertedCount() const;
+
+    // --- mission scripts (LevelScript.cpp) ---
+    bool hasScript() const { return !scripts_.empty(); }
+    bool userLocked() const { return userLock_ > 0; }  // cutscene: no player control
+    bool cinematic() const { return userLock_ > 0; }
+    // Camera centre wanted by the script this frame (cutscene camera moves / locks).
+    bool scriptCamera(float& cx, float& cy) const;
+    void setViewCenter(float cx, float cy) { viewX_ = cx; viewY_ = cy; }
+    void setViewSize(float w, float h) { viewW_ = w; viewH_ = h; }
+    // Subtitles, hints, objective messages, mission result (screen space).
+    void renderOverlay(SDL_Renderer* r, int sw, int sh, float ui);
+    int missionResult() const { return result_; }  // 0 running, 1 accomplished, 2 failed
+    std::string missionResultText() const;
+    const std::vector<std::pair<int, bool>>& objectives() const { return objectives_; }
+    std::string objectiveText(int i) const;
+    void stopVoices();
+    int32_t native(int id, const int32_t* args, int count) override;
 
 private:
     struct Instance {
@@ -126,6 +150,20 @@ private:
         float gunRange = 0;
         int meleeAnim = -1;
         bool meleeKills = false;
+        // scripting
+        int elem = -1;               // index in the level's element list (the scripts' actor id)
+        int script = -1;             // ScriptInstance index, -1 = none
+        bool hidden = false;         // sent to "Honolulu" (off the map) or animation switched off
+        bool aiLocked = false;       // the script drives this actor
+        bool deactivated = false;    // hero not available to the player
+        int seqBusy = 0;             // sequence actions currently using this actor
+        int fxState = -1;            // animated scenery: -1 as placed, 0 off, 1 playing
+        bool hasPost = false;        // guard post assigned by the script
+        float postX = 0, postY = 0;
+        int postDir = -1;
+        std::map<int, int> animSwap; // ReplaceAnim
+        bool invisible = false;      // script target without a picture (knife-throwing targets...)
+        SDL_Rect box{0, 0, 0, 0};    // hit box of scripted objects
     };
     const SpriteFile* sprite(const std::string& folder, const std::string& file);
     void updateFrameRect(Instance& in);
@@ -154,12 +192,95 @@ private:
     void noise(float x, float y, float radius, int heroIdx);
     // combat (LevelCombat.cpp)
     void initHeroes();
+    bool actionAvailable(const Instance& h, int action) const;
+    int meleeFor(const Instance& h, bool& kills) const;
     void updateHeroOrder(Instance& h, int idx, float dt);
     void applyPending(Instance& in);
     void killEnemy(Instance& e);
     void knockOut(Instance& e);
     void hurtEnemy(Instance& e, int damage, int heroIdx);
     void drawEllipse(SDL_Renderer* r, const Camera& cam, float x, float y, float rx, float ry, SDL_Color c);
+    // scripting (LevelScript.cpp)
+    struct SeqAction {
+        int level = 1, type = 0;
+        int32_t a[6] = {0, 0, 0, 0, 0, 0};
+        bool started = false, done = false;
+        float t = 0;
+        int line = -1, voice = 0;  // dialogue playback
+    };
+    struct Sequence {
+        std::vector<SeqAction> acts;
+        int level = 1, maxLevel = 1;
+    };
+    void initScripts();
+    void updateScripts(float dt);
+    int32_t callScript(int scriptIdx, const char* fn, const std::vector<int32_t>& args, bool* found = nullptr);
+    void sendEvent(int elem, int32_t id);
+    void record(int type, const int32_t* a, int n);
+    bool startAction(SeqAction& s);
+    bool updateAction(SeqAction& s, float dt);
+    void finishAction(SeqAction& s);
+    Instance* actorOf(int32_t handle);
+    int elemOf(int32_t handle) const;
+    int32_t actorHandle(const Instance& in) const;
+    bool locationOf(int32_t handle, float& x, float& y, int& floor);
+    int32_t makeLocation(float x, float y, int floor);
+    void place(Instance& in, float x, float y, int floor);
+    void hide(Instance& in);
+    int floorAt(float x, float y, bool upper) const;
+    int heroBySub(int sub) const;
+    int postureOf(const Instance& in) const;
+    void setPosture(Instance& in, int posture);
+    void moveActor(Instance& in, float x, float y, bool run);
+    void showHint(int idx);
+    void updateZones();
+    void updateMusic(float dt);
+
+    ScriptFile scriptFile_;
+    std::unique_ptr<ScriptVM> vm_;
+    std::vector<ScriptInstance> scripts_;  // 0 = the level's StartUp class
+    std::vector<int> elemInst_;            // element -> instance (-1 = not shown)
+    std::vector<size_t> elemOffsets_;      // element -> offset in the ELEM chunk
+    std::vector<int> elemScript_;          // element -> script instance
+    std::vector<LevelElement::Kind> elemKind_;
+    std::vector<int> elemCls_;
+    std::map<std::pair<int, int>, int> waypointScript_;
+    std::vector<ScriptZone> zones_;
+    std::vector<int> zoneScript_;
+    std::vector<std::vector<uint8_t>> zoneInside_;  // per zone: element inside flags
+    std::vector<SDL_FPoint> dynLocs_;
+    std::vector<int> dynFloors_;
+    std::vector<int32_t> thisStack_;
+    Dialogues dialogues_;
+    std::vector<Sequence> running_;
+    Sequence recording_;
+    bool isRecording_ = false;
+    int userLock_ = 0;
+    bool briefing_ = false;
+    std::map<int, int32_t> globals_;
+    std::map<std::pair<int, int>, int32_t> props_;
+    std::map<std::pair<int, int>, bool> actionAvail_;
+    std::vector<std::pair<int, bool>> objectives_;
+    float hourT_ = 0, victoryT_ = 0, zoneT_ = 0;
+    int seconds_ = 0;
+    int result_ = 0, defeatText_ = -1;
+    bool forceVictory_ = false;
+    // camera
+    float viewX_ = 0, viewY_ = 0, viewW_ = 800, viewH_ = 600;
+    bool camActive_ = false;
+    float camX_ = 0, camY_ = 0;
+    int camLock_ = -1;
+    // overlay
+    std::string subtitle_, speaker_;
+    float subtitleT_ = 0;
+    std::string hint_;
+    struct Toast { std::string title, text; float t; };
+    std::vector<Toast> toasts_, pendingToasts_;
+    float hintT_ = 0;
+    // music: calm / suspicious / alarm tracks of the level (MSIC chunk)
+    std::string music_[3];
+    int musicState_ = -1, musicHandle_ = 0;
+    float musicHold_ = 0;
 
     int number_ = 0;
     LevelFile file_;

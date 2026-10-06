@@ -1,6 +1,12 @@
-// Hero actions: shooting (each hero's own gun from weapons.dat), knife / punch / kick.
-// The hero walks until the target is in range (and in sight for guns), then plays the
-// original animations; the effect is applied when the animation ends.
+// Hero actions: shooting (each hero's own gun from weapons.dat), melee (knife / punch / kick)
+// and Cooper's knife throw. The hero walks until the target is in range (and in sight for
+// ranged attacks), then plays the original animation; the effect is applied when it ends.
+//
+// The mission scripts can switch actions on and off (SetActionAvailable). The numbers are the
+// "Action N" of the original animation names: Cooper 1 Colt, 2 fist, 3 knife, 4 knife throw,
+// 5 watch; Kate 2 kick; Sanchez 2 punch; everybody's gun is action 1.
+// Targets are enemies, civilians and scripted objects (the flower pot of mission 1, targets
+// of the knife-throwing stand...): hitting an object runs its script (Shooted, Stabbed, Hit, Dagger).
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -10,13 +16,14 @@
 namespace {
 constexpr float kPi = 3.14159265358979f;
 constexpr int kAnimIdle = 0, kAnimProneShoot = 8, kAnimImpact = 25, kAnimKO = 30, kAnimDie = 33, kAnimDraw = 27,
-              kAnimShoot = 28, kAnimKnife = 35, kAnimPunch = 36, kAnimKick = 70, kAnimReload = 136,
-              kAnimReloadProne = 137;
-constexpr float kMeleeRange = 22.0f;
+              kAnimShoot = 28, kAnimKnife = 35, kAnimPunch = 36, kAnimThrow = 44, kAnimKick = 70, kAnimSanchezPunch = 82,
+              kAnimReload = 136, kAnimReloadProne = 137;
+constexpr float kMeleeRange = 22.0f, kThrowRange = 150.0f;
 constexpr float kGunNoise = 420.0f;      // ground px: enemies in this radius hear a shot
 constexpr float kRangeScale = 0.6f;      // weapons.dat ranges -> ground pixels
 constexpr float kHeightStanding = 45.0f;
-constexpr int kEffectShot = 1, kEffectKill = 2, kEffectKO = 3, kEffectReload = 4;
+constexpr int kEffectShot = 1, kEffectKill = 2, kEffectKO = 3, kEffectReload = 4, kEffectThrow = 5;
+constexpr int kSubCooper = 1, kSubKate = 4, kSubSanchez = 5;
 
 float groundDist(float ax, float ay, float bx, float by) {
     float dx = bx - ax, dy = 2.0f * (by - ay);
@@ -50,30 +57,57 @@ void Level::initHeroes() {
             h.maxAmmo = h.ammo = 6;
         }
         if (!hasAnim(h.set, kAnimShoot)) h.gunRange = 0;
-        // melee: Cooper's knife kills silently, Kate's kick and punches knock out
-        if (id == 1 && hasAnim(h.set, kAnimKnife)) { h.meleeAnim = kAnimKnife; h.meleeKills = true; }
-        else if (hasAnim(h.set, kAnimKick)) h.meleeAnim = kAnimKick;
-        else if (hasAnim(h.set, kAnimPunch)) h.meleeAnim = kAnimPunch;
     }
+}
+
+bool Level::actionAvailable(const Instance& h, int action) const {
+    auto it = actionAvail_.find({h.elem, action});
+    return it == actionAvail_.end() || it->second;
+}
+
+// Melee attack of a hero right now: animation, and whether it kills (knife) or knocks out.
+int Level::meleeFor(const Instance& h, bool& kills) const {
+    kills = false;
+    if (h.el.sub == kSubCooper) {
+        if (actionAvailable(h, 3) && hasAnim(h.set, kAnimKnife)) { kills = true; return kAnimKnife; }
+        if (actionAvailable(h, 2) && hasAnim(h.set, kAnimPunch)) return kAnimPunch;
+        return -1;
+    }
+    if (!actionAvailable(h, 2)) return -1;
+    if (h.el.sub == kSubKate && hasAnim(h.set, kAnimKick)) return kAnimKick;
+    if (h.el.sub == kSubSanchez && hasAnim(h.set, kAnimSanchezPunch)) return kAnimSanchezPunch;
+    if (hasAnim(h.set, kAnimPunch)) return kAnimPunch;
+    return -1;
 }
 
 bool Level::selectedCan(Action a) const {
     if (selected_ < 0 || selected_ >= (int)instances_.size()) return false;
     const Instance& h = instances_[selected_];
-    if (h.ai == Instance::AI::Dead) return false;
-    if (a == Action::Gun) return h.gunRange > 0;
-    if (a == Action::Melee) return h.meleeAnim >= 0;
-    return false;
+    if (h.ai == Instance::AI::Dead || h.hidden) return false;
+    bool kills;
+    switch (a) {
+    case Action::Gun: return h.gunRange > 0 && actionAvailable(h, 1);
+    case Action::Melee: return meleeFor(h, kills) >= 0;
+    case Action::Throw: return h.el.sub == kSubCooper && hasAnim(h.set, kAnimThrow) && actionAvailable(h, 4);
+    default: return false;
+    }
 }
 
 int Level::selectedActionAnim(Action a) const {
     if (selected_ < 0) return -1;
     const Instance& h = instances_[selected_];
-    return a == Action::Gun ? kAnimShoot : (a == Action::Melee ? h.meleeAnim : -1);
+    bool kills;
+    switch (a) {
+    case Action::Gun: return kAnimShoot;
+    case Action::Melee: return meleeFor(h, kills);
+    case Action::Throw: return kAnimThrow;
+    default: return -1;
+    }
 }
 
 float Level::selectedGunRange() const {
-    return selected_ >= 0 ? instances_[selected_].gunRange : 0;
+    if (selected_ < 0) return 0;
+    return instances_[selected_].gunRange;
 }
 
 int Level::selectedAmmo(int* maxAmmo) const {
@@ -82,15 +116,37 @@ int Level::selectedAmmo(int* maxAmmo) const {
     return instances_[selected_].ammo;
 }
 
-bool Level::orderAttack(Action a, int enemyIdx) {
-    if (!selectedCan(a) || enemyIdx < 0 || enemyIdx >= (int)instances_.size()) return false;
+// Something the selected hero can attack at a world point: enemies first, then civilians and
+// animals, then scripted objects. Returns an instance index or -1.
+int Level::pickTarget(float wx, float wy, float slack) const {
+    int e = pickEnemy(wx, wy, slack);
+    if (e >= 0) return e;
+    int best = -1;
+    float bestD = 1e30f;
+    for (size_t i = 0; i < instances_.size(); ++i) {
+        const auto& in = instances_[i];
+        if (in.hidden || in.ai == Instance::AI::Dead || in.el.faction == Faction::Hero) continue;
+        const bool object = in.script >= 0 && in.el.kind != LevelElement::Actor;
+        const bool person = in.el.kind == LevelElement::Actor && (in.el.faction == Faction::Civilian || in.el.faction == Faction::Enemy);
+        if (!object && !person) continue;
+        const SDL_Rect& w = in.world;
+        if (wx < w.x - slack || wx > w.x + w.w + slack || wy < w.y - slack || wy > w.y + w.h + slack) continue;
+        float cx = w.x + w.w * 0.5f, cy = w.y + w.h * 0.5f;
+        float d = (wx - cx) * (wx - cx) + (wy - cy) * (wy - cy) + (object ? 0 : 400);  // prefer objects under the finger
+        if (d < bestD) { bestD = d; best = (int)i; }
+    }
+    return best;
+}
+
+bool Level::orderAttack(Action a, int targetIdx) {
+    if (!selectedCan(a) || userLocked() || targetIdx < 0 || targetIdx >= (int)instances_.size()) return false;
     Instance& h = instances_[selected_];
-    const Instance& e = instances_[enemyIdx];
-    if (e.ai == Instance::AI::Dead) return false;
+    const Instance& e = instances_[targetIdx];
+    if (e.ai == Instance::AI::Dead || e.hidden || &e == &h) return false;
     if (a == Action::Gun && e.ai == Instance::AI::KO) return false;  // no point shooting someone out cold
     h.untouched = false;
     h.order = a;
-    h.orderTarget = enemyIdx;
+    h.orderTarget = targetIdx;
     h.orderRepath = 0;
     h.path.clear();
     return true;
@@ -107,17 +163,21 @@ void Level::updateHeroOrder(Instance& h, int idx, float dt) {
     if (h.order == Action::None || h.transition >= 0) return;
     if (h.orderTarget < 0 || h.orderTarget >= (int)instances_.size()) { h.order = Action::None; return; }
     Instance& e = instances_[h.orderTarget];
-    if (e.ai == Instance::AI::Dead || (h.order == Action::Gun && e.ai == Instance::AI::KO)) {
+    const bool object = e.el.kind != LevelElement::Actor;
+    if (e.ai == Instance::AI::Dead || e.hidden || (h.order == Action::Gun && e.ai == Instance::AI::KO)) {
         h.order = Action::None;
         h.path.clear();
         return;
     }
-    const float d = groundDist(h.x, h.y, e.x, e.y);
+    const float tx = e.x, ty = e.y;
+    const float d = groundDist(h.x, h.y, tx, ty);
     bool ready;
     if (h.order == Action::Gun)
-        ready = d <= h.gunRange && lineOfSight(h.x, h.y, e.x, e.y, kHeightStanding);
+        ready = d <= h.gunRange && (object || lineOfSight(h.x, h.y, tx, ty, kHeightStanding));
+    else if (h.order == Action::Throw)
+        ready = d <= kThrowRange && (object || lineOfSight(h.x, h.y, tx, ty, kHeightStanding));
     else
-        ready = d <= kMeleeRange;
+        ready = d <= kMeleeRange + (object ? 14.0f : 0.0f);
 
     if (!ready) {  // walk (or crawl) closer, re-planning while the target moves
         h.orderRepath -= dt;
@@ -125,7 +185,7 @@ void Level::updateHeroOrder(Instance& h, int idx, float dt) {
             h.orderRepath = 0.5f;
             if (h.floor < (int)nav_.size()) {
                 std::vector<SDL_FPoint> p;
-                if (nav_[h.floor].findPath({h.x, h.y}, {e.x, e.y}, p) && !p.empty()) {
+                if (nav_[h.floor].findPath({h.x, h.y}, {tx, ty}, p) && !p.empty()) {
                     h.path = std::move(p);
                     h.pathIdx = 0;
                 } else {
@@ -137,7 +197,7 @@ void Level::updateHeroOrder(Instance& h, int idx, float dt) {
     }
     h.path.clear();
     h.pathIdx = 0;
-    setAnim(h, h.prone ? 7 : kAnimIdle, dirTowards(e.x - h.x, e.y - h.y));
+    setAnim(h, h.prone ? 7 : kAnimIdle, dirTowards(tx - h.x, ty - h.y));
 
     if (h.order == Action::Gun) {
         if (h.ammo <= 0) {  // reload first
@@ -158,9 +218,19 @@ void Level::updateHeroOrder(Instance& h, int idx, float dt) {
         noise(h.x, h.y, kGunNoise, idx);
         return;
     }
+    if (h.order == Action::Throw) {
+        playOnce(h, kAnimThrow);
+        h.pending = kEffectThrow;
+        h.pendingTarget = h.orderTarget;
+        h.order = Action::None;
+        return;
+    }
     // melee
-    playOnce(h, h.meleeAnim);
-    h.pending = h.meleeKills ? kEffectKill : kEffectKO;
+    bool kills = false;
+    int anim = meleeFor(h, kills);
+    if (anim < 0) { h.order = Action::None; return; }
+    playOnce(h, anim);
+    h.pending = kills ? kEffectKill : kEffectKO;
     h.pendingTarget = h.orderTarget;
     h.order = Action::None;
 }
@@ -174,7 +244,12 @@ void Level::applyPending(Instance& h) {
     Instance& e = instances_[h.pendingTarget];
     const int heroIdx = (int)(&h - &instances_[0]);
     if (e.ai == Instance::AI::Dead) return;
-    if (effect == kEffectKill) { killEnemy(e); return; }
+    if (e.el.kind != LevelElement::Actor) {  // scripted object: its script decides what happens
+        const char* ev = effect == kEffectShot ? "Shooted" : effect == kEffectKill ? "Stabbed" : effect == kEffectThrow ? "Dagger" : "Hit";
+        if (e.script >= 0) callScript(e.script, ev, {actorHandle(h)});
+        return;
+    }
+    if (effect == kEffectKill || effect == kEffectThrow) { killEnemy(e); return; }
     if (effect == kEffectKO) { knockOut(e); return; }
     if (effect == kEffectShot) {
         const float d = groundDist(h.x, h.y, e.x, e.y);
@@ -192,11 +267,13 @@ void Level::killEnemy(Instance& e) {
     e.order = Action::None;
     e.pending = 0;
     e.discovered = false;
+    e.prone = false;
     playOnce(e, kAnimDie, true);
 }
 
 void Level::knockOut(Instance& e) {
     if (e.ai == Instance::AI::Dead) return;
+    if (e.ai == Instance::AI::None) e.ai = Instance::AI::Calm;  // civilians get up again too
     e.ai = Instance::AI::KO;
     e.koT = 25.0f + frand() * 10.0f;
     e.path.clear();
@@ -215,7 +292,7 @@ bool Level::debugNearestEnemy(float x, float y, float& ex, float& ey, int skip) 
     std::vector<std::pair<float, int>> list;
     for (size_t i = 0; i < instances_.size(); ++i) {
         const auto& e = instances_[i];
-        if (e.el.faction != Faction::Enemy || e.ai == Instance::AI::Dead || e.ai == Instance::AI::None) continue;
+        if (e.el.faction != Faction::Enemy || e.ai == Instance::AI::Dead || e.ai == Instance::AI::None || e.hidden) continue;
         list.push_back({groundDist(x, y, e.x, e.y), (int)i});
     }
     std::sort(list.begin(), list.end());
@@ -234,4 +311,12 @@ void Level::debugState() const {
         if (e.el.faction == Faction::Enemy && e.ai != Instance::AI::Calm && e.ai != Instance::AI::None)
             SDL_Log("  enemy %s at %.0f,%.0f %s health %d", e.el.set.c_str(), e.x, e.y, names[(int)e.ai], e.health);
     }
+}
+
+bool Level::debugAttackElement(int elem, Action a) {
+    if (elem < 0 || elem >= (int)elemInst_.size() || elemInst_[elem] < 0) return false;
+    if (selected_ < 0) selected_ = firstHero();
+    bool ok = orderAttack(a, elemInst_[elem]);
+    SDL_Log("debug: attack element %d with action %d: %s", elem, (int)a, ok ? "ordered" : "refused");
+    return ok;
 }

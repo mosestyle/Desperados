@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <cmath>
 
+#include "audio/Audio.h"
 #include "core/FileSystem.h"
+#include "render/BitmapFont.h"
 #include "screens/LevelSelectScreen.h"
 #include "screens/MapViewScreen.h"
 #include "screens/WaitingForDataScreen.h"
@@ -72,6 +74,7 @@ bool App::init() {
     SDL_GetRendererInfo(renderer_, &info);
     SDL_Log("Renderer: %s, max texture %dx%d", info.name, info.max_texture_width, info.max_texture_height);
     updateSize();
+    if (!SDL_getenv("DESP_NOAUDIO")) Audio::get().init();
     return true;
 }
 
@@ -98,6 +101,7 @@ void App::replace(std::unique_ptr<Screen> s) {
 
 void App::shutdown() {
     screens_.clear();
+    Audio::get().shutdown();
     graveyard_.clear();
     if (renderer_) SDL_DestroyRenderer(renderer_);
     if (window_) SDL_DestroyWindow(window_);
@@ -121,14 +125,15 @@ int App::run() {
         while (SDL_PollEvent(&e)) {
             switch (e.type) {
             case SDL_QUIT: running_ = false; break;
-            case SDL_APP_WILLENTERBACKGROUND: paused = true; break;
-            case SDL_APP_DIDENTERFOREGROUND: paused = false; last = SDL_GetPerformanceCounter(); break;
+            case SDL_APP_WILLENTERBACKGROUND: paused = true; Audio::get().pauseAll(true); break;
+            case SDL_APP_DIDENTERFOREGROUND: paused = false; Audio::get().pauseAll(false); last = SDL_GetPerformanceCounter(); break;
             case SDL_WINDOWEVENT:
                 if (e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) updateSize();
                 break;
             case SDL_RENDER_DEVICE_RESET:
             case SDL_RENDER_TARGETS_RESET:
                 SDL_Log("Render device reset: recreating textures");
+                releaseFonts();
                 for (auto& s : screens_) s->recreateTextures(renderer_);
                 break;
             case SDL_KEYDOWN:
@@ -147,6 +152,7 @@ int App::run() {
         Uint64 now = SDL_GetPerformanceCounter();
         float dt = std::min(0.1f, (float)(now - last) / (float)SDL_GetPerformanceFrequency());
         last = now;
+        if (opt_.fixedStep) dt = 1.0f / 30.0f;
 
         input_.update(SDL_GetTicks());
         auto gestures = input_.take();
@@ -171,7 +177,8 @@ int App::run() {
             }
         }
         screens_.back()->render(renderer_);
-        if (!opt_.shot.empty() && frameCount_ % 60 == 0 && frameCount_ < opt_.shotFrame) {
+        const int every = SDL_getenv("DESP_SHOTEVERY") ? SDL_atoi(SDL_getenv("DESP_SHOTEVERY")) : 60;
+        if (!opt_.shot.empty() && frameCount_ % every == 0 && frameCount_ < opt_.shotFrame) {
             char buf[32];
             SDL_snprintf(buf, sizeof buf, "_%03d.bmp", frameCount_);
             saveScreenshot(opt_.shot + buf);
