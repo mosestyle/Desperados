@@ -15,9 +15,9 @@ jobs:
   android:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
@@ -37,12 +37,15 @@ jobs:
 
       - name: Add SDL's Java glue
         run: |
+          # SDL ships its own sample Gradle project with a wrapper jar we don't use
+          rm -rf android/SDL/android-project/gradle android/SDL/android-project/gradlew*
           mkdir -p android/app/src/main/java/org/libsdl
           cp -r android/SDL/android-project/app/src/main/java/org/libsdl/app android/app/src/main/java/org/libsdl/
 
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.7'
+          validate-wrappers: false
 
       - name: Build APK
         working-directory: android
@@ -50,7 +53,22 @@ jobs:
           NDK_ARG=""
           if [ -n "$ANDROID_NDK_LATEST_HOME" ]; then NDK_ARG="-PndkVersion=$(basename "$ANDROID_NDK_LATEST_HOME")"; fi
           echo "NDK: $NDK_ARG"
-          gradle assembleRelease --no-daemon --stacktrace $NDK_ARG -PversionCode=${{ github.run_number }}
+          set -o pipefail
+          gradle assembleRelease --no-daemon $NDK_ARG -PversionCode=${{ github.run_number }} 2>&1 | tee ../build.log
+
+      # Surface the important part of a failed build as annotations (readable without log access)
+      - name: Report build errors
+        if: failure()
+        run: |
+          [ -f build.log ] || exit 0
+          { grep -E "error:|error :|undefined reference|CMake Error|FAILED" build.log | head -n 60;
+            grep -A 10 "What went wrong" build.log | head -n 40; } > errors.txt || true
+          split -l 12 errors.txt part_
+          for f in part_*; do
+            msg=$(sed 's/%/%25/g' "$f" | awk '{printf "%s%%0A", $0}')
+            echo "::error title=build::${msg}"
+          done
+          echo "::error title=tail::$(tail -n 25 build.log | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')"
 
       - name: Collect APK
         run: |
