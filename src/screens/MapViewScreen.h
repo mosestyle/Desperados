@@ -30,6 +30,7 @@ private:
     SDL_FRect minimapRect() const;
     bool inMinimap(float x, float y) const;
     void jumpFromMinimap(float x, float y, bool animate);
+    bool selectHeroOnMinimap(float x, float y);
 
     int level_;
     bool loaded_ = false;
@@ -38,4 +39,5 @@ private:
     Camera cam_;
     bool draggingMinimap_ = false;
     bool firstLayout_ = true;
+    bool lastTapMoved_ = false;
 };

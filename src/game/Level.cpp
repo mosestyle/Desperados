@@ -7,10 +7,21 @@
 #include "../core/FileSystem.h"
 
 static constexpr float kTicksPerSecond = 25.0f;  // original engine rate
+static constexpr float kPi = 3.14159265358979f;
+static constexpr int kAnimIdle = 0, kAnimWalk = 3, kAnimRun = 5;
+// Ground speeds (px/s): walk animations move 2 px per frame, run 6 px, at 25 frames/s.
+static constexpr float kWalkSpeed = 50.0f, kRunSpeed = 150.0f;
 
 static std::string lower(std::string s) {
     std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return (char)std::tolower(c); });
     return s;
+}
+
+// 16 facing directions: 0 = up (north), clockwise. Screen y is squashed 2:1 on the ground.
+static int directionOf(float dx, float dy) {
+    float a = std::atan2(dx, -2.0f * dy);
+    int d = (int)std::lround(a / (kPi / 8.0f));
+    return (d % 16 + 16) % 16;
 }
 
 Level::~Level() { releaseTextures(); }
@@ -50,9 +61,13 @@ bool Level::load(SDL_Renderer* r, int number) {
         std::string name;
         file_.readMinimap(name, minimap_);
         size_t n = 0;
-        if (const uint8_t* m = file_.chunkData("MASK", &n)) {
+        if (const uint8_t* m = file_.chunkData("MASK", &n))
             if (!parseMasks(m, n, masks_)) SDL_Log("Level %d: mask data only partly read", number);
-        }
+        if (const uint8_t* m = file_.chunkData("MOVE", &n))
+            if (!parseMotionAreas(m, n, layers_)) SDL_Log("Level %d: motion areas only partly read", number);
+        nav_.resize(layers_.size());
+        for (size_t i = 0; i < layers_.size(); ++i) nav_[i].build(layers_[i], background_.w, background_.h);
+
         SpriteIndex index;
         index.build();
         if (const uint8_t* e = file_.chunkData("ELEM", &n)) {
@@ -65,21 +80,34 @@ bool Level::load(SDL_Renderer* r, int number) {
                 in.set = in.file->set(el.set);
                 if (!in.set && !in.file->sets().empty()) in.set = &in.file->sets().front();
                 if (!in.set) continue;
-                const int dir = in.set->dirCount >= 16 ? el.dir : 0;
-                in.rec = el.kind == LevelElement::Actor ? in.set->find(0, dir)
-                                                        : (in.set->records.empty() ? nullptr : &in.set->records.front());
+                if (el.kind == LevelElement::Actor) {
+                    in.dir = in.set->dirCount >= 16 ? el.dir : 0;
+                    in.rec = in.set->find(kAnimIdle, in.dir);
+                    if (!in.rec) continue;
+                    // stored position = top-left of the anchor box; the anchor point is the feet
+                    in.x = (float)(el.x + in.rec->anchorX);
+                    in.y = (float)(el.y + in.rec->anchorY);
+                    in.floor = 0;
+                    for (size_t l = 0; l < layers_.size(); ++l)
+                        if (layers_[l].walkable(in.x, in.y)) { in.floor = (int)l; break; }
+                } else {
+                    in.rec = in.set->records.empty() ? nullptr : &in.set->records.front();
+                }
                 if (!in.rec || in.rec->entries.empty()) continue;
                 // desynchronise identical animations (crowds, rivers...)
-                in.entry = (int)((el.x * 7 + el.y * 13) % (int)in.rec->entries.size());
-                in.ticks = (float)((el.x + el.y) % 7);
+                in.entry = (int)(((el.x * 7 + el.y * 13) % (int)in.rec->entries.size() + (int)in.rec->entries.size()) %
+                                 (int)in.rec->entries.size());
+                in.ticks = (float)(((el.x + el.y) % 7 + 7) % 7);
                 updateFrameRect(in);
                 instances_.push_back(std::move(in));
             }
         }
     }
     recreateTextures(r);
-    SDL_Log("Level %d: %dx%d, %d elements, %d sprite files, %d masks, loaded in %u ms", number, background_.w,
-            background_.h, (int)instances_.size(), (int)sprites_.size(), (int)masks_.size(), SDL_GetTicks() - t0);
+    selected_ = firstHero();
+    SDL_Log("Level %d: %dx%d, %d elements (%d actors), %d sprite files, %d masks, %d layers, loaded in %u ms", number,
+            background_.w, background_.h, (int)instances_.size(), actorCount(), (int)sprites_.size(),
+            (int)masks_.size(), (int)layers_.size(), SDL_GetTicks() - t0);
     return true;
 }
 
@@ -87,6 +115,27 @@ int Level::actorCount() const {
     int n = 0;
     for (const auto& in : instances_) n += in.el.kind == LevelElement::Actor;
     return n;
+}
+
+int Level::firstHero() const {
+    // prefer a hero standing on walkable ground (some start off-map for their entrance)
+    int any = -1;
+    for (size_t i = 0; i < instances_.size(); ++i) {
+        const auto& in = instances_[i];
+        if (in.el.faction != Faction::Hero) continue;
+        if (in.x >= 0 && in.y >= 0 && in.x < width() && in.y < height()) return (int)i;
+        if (any < 0) any = (int)i;
+    }
+    return any;
+}
+
+void Level::actorDots(std::vector<ActorDot>& out) const {
+    out.clear();
+    for (size_t i = 0; i < instances_.size(); ++i) {
+        const auto& in = instances_[i];
+        if (in.el.kind != LevelElement::Actor || in.el.faction == Faction::None) continue;
+        out.push_back({in.x, in.y, in.el.faction, (int)i == selected_});
+    }
 }
 
 void Level::releaseTextures() {
@@ -130,21 +179,71 @@ void Level::updateFrameRect(Instance& in) {
     const SpriteEntry& e = in.rec->entries[in.entry];
     const auto& frames = in.file->frames();
     int w = e.frame < frames.size() ? frames[e.frame].w : 0, h = e.frame < frames.size() ? frames[e.frame].h : 0;
-    // The stored position is the top-left corner of the sprite's anchor box;
-    // the anchor point inside that box (70,71 for people) is where the feet are.
-    in.world = {in.el.x + e.x, in.el.y + e.y, w, h};
     if (in.el.kind == LevelElement::Actor) {
-        in.foot = {in.el.x + in.rec->anchorX, in.el.y + in.rec->anchorY};
-        in.sortY = in.foot.y;
+        in.world = {(int)std::lround(in.x) - in.rec->anchorX + e.x, (int)std::lround(in.y) - in.rec->anchorY + e.y, w, h};
+        in.sortY = (int)std::lround(in.y);
     } else {
+        in.world = {in.el.x + e.x, in.el.y + e.y, w, h};
         in.sortY = in.el.y + in.el.z;
-        in.foot = {in.world.x + w / 2, in.sortY};
+        in.x = (float)(in.world.x + w / 2);
+        in.y = (float)in.sortY;
+    }
+}
+
+void Level::setAnim(Instance& in, int anim, int dir) {
+    if (in.set->dirCount < 16) dir = 0;
+    if (anim == in.anim && dir == in.dir && in.rec) return;
+    const SpriteRecord* rec = in.set->find(anim, dir);
+    if (!rec || rec->entries.empty()) rec = in.set->find(kAnimIdle, dir);
+    if (!rec || rec->entries.empty()) return;
+    const bool sameAnim = anim == in.anim;
+    in.anim = anim;
+    in.dir = dir;
+    in.rec = rec;
+    if (!sameAnim) { in.entry = 0; in.ticks = 0; in.stepAcc = 0; }
+    in.entry %= (int)rec->entries.size();
+}
+
+void Level::updateMovement(Instance& in, float dt) {
+    float budget = (in.running ? kRunSpeed : kWalkSpeed) * dt;  // ground distance this frame
+    while (budget > 0 && in.pathIdx < in.path.size()) {
+        const SDL_FPoint wp = in.path[in.pathIdx];
+        float dx = wp.x - in.x, dy = wp.y - in.y;
+        float len = std::sqrt(dx * dx + 4 * dy * dy);
+        if (len < 0.01f) { ++in.pathIdx; continue; }
+        setAnim(in, in.running ? kAnimRun : kAnimWalk, directionOf(dx, dy));
+        float move = std::min(budget, len);
+        in.x += dx * move / len;
+        in.y += dy * move / len;
+        budget -= move;
+        in.stepAcc += move;
+        if (move >= len) ++in.pathIdx;
+    }
+    // advance the walk cycle by distance, as the original does (frames have a step, no duration)
+    const auto& entries = in.rec->entries;
+    for (int guard = 0; guard < 32; ++guard) {
+        int step = std::max<int>(1, entries[in.entry].step);
+        if (in.stepAcc < step) break;
+        in.stepAcc -= step;
+        in.entry = (in.entry + 1) % (int)entries.size();
+    }
+    if (in.pathIdx >= in.path.size()) {
+        in.path.clear();
+        in.pathIdx = 0;
+        setAnim(in, kAnimIdle, in.dir);
     }
 }
 
 void Level::update(float dt) {
+    time_ += dt;
+    targetFade_ = std::max(0.0f, targetFade_ - dt * 1.2f);
     const float ticks = dt * kTicksPerSecond;
     for (auto& in : instances_) {
+        if (!in.path.empty()) {
+            updateMovement(in, dt);
+            updateFrameRect(in);
+            continue;
+        }
         const auto& entries = in.rec->entries;
         if (entries.size() < 2) continue;
         in.ticks += ticks;
@@ -160,8 +259,75 @@ void Level::update(float dt) {
     }
 }
 
+int Level::pickHero(float wx, float wy, float slack) const {
+    int best = -1;
+    float bestD = 1e30f;
+    for (size_t i = 0; i < instances_.size(); ++i) {
+        const auto& in = instances_[i];
+        if (in.el.faction != Faction::Hero) continue;
+        const SDL_Rect& w = in.world;
+        if (wx < w.x - slack || wx > w.x + w.w + slack || wy < w.y - slack || wy > w.y + w.h + slack) continue;
+        float cx = in.x, cy = in.y - w.h * 0.4f;  // roughly the body centre
+        float d = (wx - cx) * (wx - cx) + (wy - cy) * (wy - cy);
+        if (d < bestD) { bestD = d; best = (int)i; }
+    }
+    return best;
+}
+
+bool Level::selectedPosition(float& x, float& y) const {
+    if (selected_ < 0 || selected_ >= (int)instances_.size()) return false;
+    x = instances_[selected_].x;
+    y = instances_[selected_].y;
+    return true;
+}
+
+bool Level::moveSelected(float wx, float wy, bool run) {
+    if (selected_ < 0 || selected_ >= (int)instances_.size()) return false;
+    Instance& in = instances_[selected_];
+    if (in.floor >= (int)nav_.size()) return false;
+    std::vector<SDL_FPoint> path;
+    if (!nav_[in.floor].findPath({in.x, in.y}, {wx, wy}, path) || path.empty()) return false;
+    in.path = std::move(path);
+    in.pathIdx = 0;
+    in.running = run;
+    target_ = in.path.back();
+    targetFade_ = 1.0f;
+    return true;
+}
+
+void Level::setSelectedRunning(bool run) {
+    if (selected_ >= 0 && selected_ < (int)instances_.size() && !instances_[selected_].path.empty())
+        instances_[selected_].running = run;
+}
+
+void Level::drawEllipse(SDL_Renderer* r, const Camera& cam, float x, float y, float rx, float ry, SDL_Color c) {
+    SDL_FPoint pts[33];
+    for (int t = 0; t < 2; ++t) {  // two rings for a thicker line
+        float k = 1.0f + t * 0.06f;
+        for (int i = 0; i <= 32; ++i) {
+            float a = (float)i / 32 * 2 * kPi;
+            pts[i] = {cam.toScreenX(x + std::cos(a) * rx * k), cam.toScreenY(y + std::sin(a) * ry * k)};
+        }
+        SDL_SetRenderDrawColor(r, c.r, c.g, c.b, c.a);
+        SDL_RenderDrawLinesF(r, pts, 33);
+    }
+}
+
 void Level::render(SDL_Renderer* r, const Camera& cam, int sw, int sh) {
     bgTex_.draw(r, cam.originX(), cam.originY(), cam.zoom, sw, sh);
+    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+
+    // ground markers: walk target and selection ring (drawn under the sprites)
+    if (targetFade_ > 0) {
+        Uint8 a = (Uint8)(220 * targetFade_);
+        float s = 6 + 10 * (1 - targetFade_);
+        drawEllipse(r, cam, target_.x, target_.y, s, s * 0.5f, {120, 255, 120, a});
+    }
+    if (selected_ >= 0 && selected_ < (int)instances_.size()) {
+        const auto& in = instances_[selected_];
+        float pulse = 0.85f + 0.15f * std::sin(time_ * 5);
+        drawEllipse(r, cam, in.x, in.y, 15 * pulse, 7.5f * pulse, {90, 255, 90, 230});
+    }
 
     // painter's order: things whose base is further up the screen are drawn first
     drawOrder_.resize(instances_.size());
@@ -185,10 +351,10 @@ void Level::render(SDL_Renderer* r, const Camera& cam, int sw, int sh) {
         bool clipped = false;
         for (size_t m = 0; m < masks_.size(); ++m) {
             const Mask& mk = masks_[m];
-            if (!maskTex_[m] || mk.group != in.el.floor) continue;
+            if (!maskTex_[m] || mk.group != in.floor) continue;
             const SDL_Rect& mr = mk.rect;
             if (mr.x >= w.x + w.w || mr.y >= w.y + w.h || mr.x + mr.w <= w.x || mr.y + mr.h <= w.y) continue;
-            if (in.foot.y >= mk.lineY((float)in.foot.x)) continue;  // sprite is in front of this mask
+            if (in.y >= mk.lineY(in.x)) continue;  // sprite is in front of this mask
             if (!clipped) { SDL_RenderSetClipRect(r, &clip); clipped = true; }
             SDL_FRect md{cam.toScreenX((float)mr.x), cam.toScreenY((float)mr.y), mr.w * cam.zoom, mr.h * cam.zoom};
             SDL_RenderCopyF(r, maskTex_[m], nullptr, &md);

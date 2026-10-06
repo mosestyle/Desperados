@@ -157,7 +157,11 @@ int App::run() {
 
         if (!opt_.shot.empty() && ++frameCount_ == 3) {
             if (auto* mv = dynamic_cast<MapViewScreen*>(screens_.back().get()))
+            {
+                float hx, hy;
                 if (opt_.viewX >= 0) mv->setView(opt_.viewX, opt_.viewY, opt_.viewZoom > 0 ? opt_.viewZoom : 1.0f);
+                else if (mv->levelData().selectedPosition(hx, hy)) mv->setView(hx, hy, 1.4f);
+            }
         }
         screens_.back()->render(renderer_);
         if (!opt_.shot.empty() && frameCount_ == 40) { saveScreenshot(opt_.shot); running_ = false; }
@@ -195,6 +199,39 @@ void App::saveScreenshot(const std::string& path) {
 }
 
 void App::runAutotestStep(uint32_t now) {
+    if (steps_.empty() && opt_.startLevel > 0) {
+        // Level script: select the first hero, walk to a point, then run to another (tap + double tap).
+        const std::string P = opt_.autotest;
+        auto at = [this](uint32_t t, std::function<void()> fn) { steps_.push_back({t, std::move(fn)}); };
+        auto mv = [this]() { return dynamic_cast<MapViewScreen*>(screens_.back().get()); };
+        auto tapWorld = [this, mv](float wx, float wy, bool dbl) {
+            MapViewScreen* m = mv();
+            if (!m) return;
+            float sx = m->camera().toScreenX(wx), sy = m->camera().toScreenY(wy);
+            injectFinger(SDL_FINGERDOWN, 1, sx, sy);
+            injectFinger(SDL_FINGERUP, 1, sx, sy);
+            if (dbl) { injectFinger(SDL_FINGERDOWN, 1, sx, sy); injectFinger(SDL_FINGERUP, 1, sx, sy); }
+        };
+        float tx = opt_.viewX, ty = opt_.viewY;  // --view gives the walk target here
+        at(300, [=] {
+            if (MapViewScreen* m = mv()) {
+                float hx, hy;
+                if (m->levelData().selectedPosition(hx, hy)) {
+                    SDL_Log("hero at %.0f,%.0f", hx, hy);
+                    m->setView((hx + tx) / 2, (hy + ty) / 2, 1.0f);
+                }
+            }
+        });
+        at(500, [=] { saveScreenshot(P + "_a_start.bmp"); });
+        at(600, [=] { tapWorld(tx, ty, false); });
+        at(1600, [=] { saveScreenshot(P + "_b_walking.bmp"); });
+        at(5000, [=] { saveScreenshot(P + "_c_arrived.bmp"); });
+        at(5100, [=] {
+            float hx, hy;
+            if (mv() && mv()->levelData().selectedPosition(hx, hy)) SDL_Log("hero now at %.0f,%.0f", hx, hy);
+            running_ = false;
+        });
+    }
     if (steps_.empty()) {
         const std::string P = opt_.autotest;
         auto at = [this](uint32_t t, std::function<void()> fn) { steps_.push_back({t, std::move(fn)}); };

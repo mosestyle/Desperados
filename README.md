@@ -12,8 +12,8 @@ the original files from your phone's storage.
 |---|---|
 | 1. Asset loaders + touch map viewer (level select, pan, pinch-zoom, minimap) | ✅ done |
 | 2. Characters, animals and animated scenery on the map, depth masking | ✅ done |
-| 3. Walkable areas, pathfinding, select & move characters by touch | ⏳ next |
-| 4. Enemy AI: vision cones, patrols, alarm states, personalities | ⏳ |
+| 3. Walkable areas, pathfinding, tap to select / walk, double-tap to run, coloured minimap | ✅ done |
+| 4. Enemy AI: vision cones, patrols, alarm states, personalities | ⏳ next |
 | 5. Mission script VM, abilities, dialogues, sound, the full campaign | ⏳ |
 
 ## Install on your phone
@@ -25,8 +25,9 @@ the original files from your phone's storage.
    The `.ogv` videos (~1 GB) are not used yet and can be left out.
 3. Start the app and allow **All files access** when asked (needed to read that folder).
 
-Controls: drag to scroll, pinch to zoom, double-tap to zoom in/out, tap or drag the minimap to jump,
-Android back button to return to the level list.
+Controls: tap a hero to select, tap the ground to walk, double-tap to run, double-tap a hero to centre
+on them. Drag to scroll, pinch to zoom, tap or drag the minimap to jump (tap a green dot to select
+that hero). Android back button returns to the level list.
 
 ## Build on a PC
 

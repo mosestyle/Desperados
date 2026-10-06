@@ -48,8 +48,10 @@ set(SOURCES
     src/formats/LevelFile.cpp
     src/formats/LevelElements.cpp
     src/formats/Masks.cpp
+    src/formats/MotionAreas.cpp
     src/formats/SpriteFile.cpp
     src/game/Level.cpp
+    src/game/NavGrid.cpp
     src/render/SpriteAtlas.cpp
     src/input/TouchInput.cpp
     src/render/Textures.cpp

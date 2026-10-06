@@ -83,22 +83,55 @@ void MapViewScreen::onGestures(const std::vector<Gesture>& gs) {
             if (!draggingMinimap_) { cam_.vx = -g.dx / cam_.zoom; cam_.vy = -g.dy / cam_.zoom; }
             draggingMinimap_ = false;
             break;
-        case Gesture::Tap:
-            if (inMinimap(g.x, g.y)) jumpFromMinimap(g.x, g.y, true);
-            break;
-        case Gesture::DoubleTap:
-            if (inMinimap(g.x, g.y)) break;
-            {
-                // zoom in around the tap; when already close, zoom back out
-                float wx = cam_.toWorldX(g.x), wy = cam_.toWorldY(g.y);
-                float target = cam_.zoom < cam_.defaultZoom() * 1.4f ? cam_.zoom * 2 : cam_.defaultZoom();
-                cam_.flyTo(wx, wy, target);
+        case Gesture::Tap: {
+            if (inMinimap(g.x, g.y)) {
+                if (!selectHeroOnMinimap(g.x, g.y)) jumpFromMinimap(g.x, g.y, true);
+                break;
             }
+            const float wx = cam_.toWorldX(g.x), wy = cam_.toWorldY(g.y);
+            // fingers are big: accept taps a little outside the sprite
+            int hero = level.pickHero(wx, wy, 14.0f * app_.uiScale() / cam_.zoom + 4.0f);
+            if (hero >= 0) { level.select(hero); lastTapMoved_ = false; break; }
+            lastTapMoved_ = level.moveSelected(wx, wy, false);
             break;
+        }
+        case Gesture::DoubleTap: {
+            if (inMinimap(g.x, g.y)) break;
+            const float wx = cam_.toWorldX(g.x), wy = cam_.toWorldY(g.y);
+            int hero = level.pickHero(wx, wy, 14.0f * app_.uiScale() / cam_.zoom + 4.0f);
+            float hx, hy;
+            if (hero >= 0 && level.selectedPosition(hx, hy)) { cam_.flyTo(hx, hy, cam_.zoom); break; }  // centre on hero
+            if (level.selected() >= 0) { level.moveSelected(wx, wy, true); break; }  // double tap = run
+            // nobody to command: zoom in around the tap; when already close, zoom back out
+            float target = cam_.zoom < cam_.defaultZoom() * 1.4f ? cam_.zoom * 2 : cam_.defaultZoom();
+            cam_.flyTo(wx, wy, target);
+            break;
+        }
         default:
             break;
         }
     }
+}
+
+bool MapViewScreen::selectHeroOnMinimap(float x, float y) {
+    SDL_FRect rc = minimapRect();
+    std::vector<Level::ActorDot> dots;
+    level.actorDots(dots);
+    const float sx = rc.w / level.width(), sy = rc.h / level.height();
+    const float radius = std::max(10.0f, rc.h * 0.06f);
+    int best = -1;
+    float bestD = radius * radius;
+    for (size_t i = 0; i < dots.size(); ++i) {
+        if (dots[i].faction != Faction::Hero) continue;
+        float dx = rc.x + dots[i].x * sx - x, dy = rc.y + dots[i].y * sy - y;
+        if (dx * dx + dy * dy < bestD) { bestD = dx * dx + dy * dy; best = (int)i; }
+    }
+    if (best < 0) return false;
+    float wx = dots[best].x, wy = dots[best].y;
+    int idx = level.pickHero(wx, wy - 1, 2);
+    if (idx >= 0) level.select(idx);
+    cam_.flyTo(wx, wy, cam_.zoom);
+    return true;
 }
 
 void MapViewScreen::update(float dt) {
@@ -129,5 +162,26 @@ void MapViewScreen::render(SDL_Renderer* r) {
             SDL_FRect v{view.x - k, view.y - k, view.w + 2 * k, view.h + 2 * k};
             SDL_RenderDrawRectF(r, &v);
         }
+        // characters: heroes green, enemies red, civilians blue, animals small grey
+        std::vector<Level::ActorDot> dots;
+        level.actorDots(dots);
+        const float d = std::max(2.0f, std::round(rc.h * 0.016f));
+        auto dot = [&](const Level::ActorDot& a, float size, SDL_Color c) {
+            float px = rc.x + a.x * sx, py = rc.y + a.y * sy;
+            if (px < rc.x || py < rc.y || px > rc.x + rc.w || py > rc.y + rc.h) return;
+            SDL_FRect outer{px - size - 1, py - size - 1, 2 * size + 2, 2 * size + 2};
+            SDL_SetRenderDrawColor(r, a.selected ? 255 : 20, a.selected ? 255 : 20, a.selected ? 255 : 20, 220);
+            SDL_RenderFillRectF(r, &outer);
+            SDL_FRect inner{px - size, py - size, 2 * size, 2 * size};
+            SDL_SetRenderDrawColor(r, c.r, c.g, c.b, 255);
+            SDL_RenderFillRectF(r, &inner);
+        };
+        for (int pass = 0; pass < 4; ++pass)  // animals first, heroes on top
+            for (const auto& a : dots) {
+                if (pass == 0 && a.faction == Faction::Animal) dot(a, d * 0.6f, {170, 160, 140, 255});
+                if (pass == 1 && a.faction == Faction::Civilian) dot(a, d * 0.8f, {90, 160, 255, 255});
+                if (pass == 2 && a.faction == Faction::Enemy) dot(a, d, {235, 40, 30, 255});
+                if (pass == 3 && a.faction == Faction::Hero) dot(a, d * 1.25f, {60, 230, 60, 255});
+            }
     }
 }

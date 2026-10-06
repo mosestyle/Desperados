@@ -48,7 +48,7 @@ Sequence of chunks `char tag[4]; u32 length; u8 body[length]`. Order in every le
 |---|---|---|
 | `MISC` | general settings | raw |
 | `BGND` | minimap: `u32 ver, u16 len, name, u16 w, u16 h, u32 codec, u32 csize, data` | **decoded** |
-| `MOVE` | walkable sectors / motion areas (`DVSectorMotionArea`) | todo |
+| `MOVE` | walkable areas per floor layer + precomputed search grid (see below) | **areas decoded** |
 | `SGHT` | sight blockers (floats) | todo |
 | `MASK` | depth masks: background pieces drawn in front of characters (see below) | **decoded** |
 | `WAYS` | waypoints / patrol routes (`DVWaypoint`) | todo |
@@ -100,6 +100,35 @@ Found by signature (u16-length sprite file name + u16-length set name):
   (`u8 type + 4 x u16` each), `s16 x, s16 y` (top-left of the 140x142 anchor box, so the feet are at x+70, y+71), 6 bytes, `u8 floor`, `u8 direction`, then
   type-specific data (script class name, AI profile, ...).
 * `Zombie` = invisible script target, `Accessories` = inventory items.
+
+## Element class bytes
+
+The two bytes in front of every element's file name are `u8 subtype, u8 class`:
+
+| class | meaning | subtype |
+|---|---|---|
+| 0 | player hero | 1 Cooper, 2 Doc, 3 Sam, 4 Kate, 5 Sanchez, 6 Mia, 7 Mr Leone |
+| 1 | NPC | 1 enemy, 2 civilian |
+| 2 | animal | 1 horse, 16 dog, 17 cow/donkey, 18 hen, 19 pig, 20 crow, 21 crocodile |
+| 8 | scripted object | |
+| 16 | animated scenery | |
+| 17 | inventory item | |
+
+## Walkable areas (MOVE chunk) - decoded
+
+Read by `DVFastFindGrid.cpp` in the original (found by disassembling the loader).
+
+```
+u32 version (1), u16 layerCount, per layer (ground, roofs, upper floors...):
+    u16 polygonCount (outlines + holes), u16 areaCount, per area:
+        u16 n, n * (s16 x, s16 y)                         outline
+        u16 lineCount, lineCount * (s16 x0,y0,x1,y1)      thin barriers (fences...)
+        u16 holeCount, holeCount * polygon                 obstacles (buildings, carts...)
+u32 3, 3 * (float, float)   then the original's precomputed search grid (not needed)
+```
+
+The layer count equals the MASK group count. 1,680 of the 1,705 placed actors stand on a
+walkable area; the rest start off-map for scripted entrances or belong to cutscenes.
 
 ## Depth masks (MASK chunk) - decoded
 

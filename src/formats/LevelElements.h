@@ -14,8 +14,17 @@
 #include <unordered_set>
 #include <vector>
 
+// Two bytes before every element: u8 subtype, u8 class.
+//   class 0  = player hero (subtype: 1 Cooper, 2 Doc, 3 Sam, 4 Kate, 5 Sanchez, 6 Mia, 7 Mr Leone)
+//   class 1  = NPC (subtype 1 enemy, 2 civilian)
+//   class 2  = animal (1 horse, 16 dog, 17 cow/donkey, 18 hen, 19 pig, 20 crow, 21 crocodile)
+//   class 8  = scripted object, 16 = animated scenery, 17 = inventory item
+enum class Faction { None, Hero, Enemy, Civilian, Animal };
+
 struct LevelElement {
     enum Kind { Scenery, Actor, Dummy, Item } kind = Scenery;
+    int cls = -1, sub = 0;
+    Faction faction = Faction::None;
     std::string folder;  // "characters" or "animations"
     std::string file, set;
     int x = 0, y = 0, z = 0;
