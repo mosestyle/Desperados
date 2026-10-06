@@ -1,0 +1,21 @@
+build/
+android/SDL/
+android/.gradle/
+android/app/build/
+android/app/.cxx/
+android/build/
+android/local.properties
+android/app/src/main/java/org/libsdl/
+*.apk
+*.bmp
+.idea/
+.vscode/
+__pycache__/
+# never commit game data
+data/
+localisation/
+*.dvd
+*.dvm
+*.dvf
+*.scb
+*.ogv

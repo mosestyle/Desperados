@@ -1,0 +1,66 @@
+plugins {
+    id 'com.android.application'
+}
+
+def sdlDir = "${rootDir}/SDL"
+
+android {
+    namespace 'com.mosestyle.desperados'
+    compileSdk 34
+    // CI passes the NDK installed on the build machine; otherwise Gradle's default is used.
+    if (project.hasProperty('ndkVersion')) {
+        ndkVersion project.property('ndkVersion')
+    }
+
+    defaultConfig {
+        applicationId 'com.mosestyle.desperados'
+        minSdk 21
+        targetSdk 34
+        versionCode((project.findProperty('versionCode') ?: '1') as int)
+        versionName "0.1.${project.findProperty('versionCode') ?: '0'}"
+        ndk {
+            abiFilters 'arm64-v8a', 'armeabi-v7a'
+        }
+        externalNativeBuild {
+            cmake {
+                arguments "-DANDROID_STL=c++_static", "-DSDL2_SOURCE_DIR=${sdlDir}", "-DCMAKE_BUILD_TYPE=Release"
+            }
+        }
+    }
+
+    // A fixed key that lives in the repo, so every new build installs over the previous one.
+    signingConfigs {
+        shared {
+            storeFile file('../debug.keystore')
+            storePassword 'android'
+            keyAlias 'androiddebugkey'
+            keyPassword 'android'
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.shared
+        }
+        debug {
+            signingConfig signingConfigs.shared
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path '../../CMakeLists.txt'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    lint {
+        checkReleaseBuilds false
+        abortOnError false
+    }
+}

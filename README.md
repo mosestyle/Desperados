@@ -1,1 +1,50 @@
-# Desperados
+# OpenDesperados
+
+An open re-implementation of the engine of **Desperados: Wanted Dead or Alive** (Spellbound, 2001),
+built for Android phones with touch controls. Written in C++17 with SDL2.
+
+**No game data is included.** You need your own copy of the game (Steam / GOG); the app reads
+the original files from your phone's storage.
+
+## Status
+
+| Milestone | State |
+|---|---|
+| 1. Asset loaders + touch map viewer (level select, pan, pinch-zoom, minimap) | ✅ done |
+| 2. Character sprites + animations on the map | ⏳ next |
+| 3. Walkable areas, pathfinding, select & move characters by touch | ⏳ |
+| 4. Enemy AI: vision cones, patrols, alarm states, personalities | ⏳ |
+| 5. Mission script VM, abilities, dialogues, sound, the full campaign | ⏳ |
+
+## Install on your phone
+
+1. Open the [latest build](../../releases/tag/latest) on your phone and install `OpenDesperados.apk`
+   (allow "install unknown apps" for your browser when Android asks).
+2. Copy your game folder from the PC to the phone's **internal storage** and name it `Desperados`,
+   so that you have `Internal storage/Desperados/data/levels/...`.
+   The `.ogv` videos (~1 GB) are not used yet and can be left out.
+3. Start the app and allow **All files access** when asked (needed to read that folder).
+
+Controls: drag to scroll, pinch to zoom, double-tap to zoom in/out, tap or drag the minimap to jump,
+Android back button to return to the level list.
+
+## Build on a PC
+
+```
+cmake -B build -DCMAKE_BUILD_TYPE=Release   # needs SDL2 + zlib development packages
+cmake --build build
+./build/desperados --data "/path/to/Desperados Wanted Dead or Alive"
+```
+
+Options: `--level N` opens a level directly, `--size 1600x720` sets the window size,
+`--autotest prefix` runs a scripted touch test and saves screenshots.
+
+The Android APK is built automatically by GitHub Actions on every push to `main`
+(`.github/workflows/android.yml`).
+
+## Documentation
+
+* [`docs/FORMATS.md`](docs/FORMATS.md) - what is known about the game's file formats.
+* `tools/desp.py` - Python helpers used to research the formats.
+
+Third-party code: [bzip2](third_party/bzip2/LICENSE), SDL2 (zlib license, downloaded at build time).

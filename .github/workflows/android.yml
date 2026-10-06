@@ -1,0 +1,75 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  SDL_VERSION: 2.30.9
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Cache SDL2 source
+        id: sdl-cache
+        uses: actions/cache@v4
+        with:
+          path: android/SDL
+          key: sdl2-${{ env.SDL_VERSION }}
+
+      - name: Download SDL2
+        if: steps.sdl-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -sSL "https://github.com/libsdl-org/SDL/releases/download/release-${SDL_VERSION}/SDL2-${SDL_VERSION}.tar.gz" | tar xz
+          mv "SDL2-${SDL_VERSION}" android/SDL
+
+      - name: Add SDL's Java glue
+        run: |
+          mkdir -p android/app/src/main/java/org/libsdl
+          cp -r android/SDL/android-project/app/src/main/java/org/libsdl/app android/app/src/main/java/org/libsdl/
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Build APK
+        working-directory: android
+        run: |
+          NDK_ARG=""
+          if [ -n "$ANDROID_NDK_LATEST_HOME" ]; then NDK_ARG="-PndkVersion=$(basename "$ANDROID_NDK_LATEST_HOME")"; fi
+          echo "NDK: $NDK_ARG"
+          gradle assembleRelease --no-daemon --stacktrace $NDK_ARG -PversionCode=${{ github.run_number }}
+
+      - name: Collect APK
+        run: |
+          cp android/app/build/outputs/apk/release/app-release.apk OpenDesperados.apk
+          ls -la OpenDesperados.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OpenDesperados-build-${{ github.run_number }}
+          path: OpenDesperados.apk
+
+      # A single "latest" release that always holds the newest APK: easy to open on the phone.
+      - name: Publish latest build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --cleanup-tag --yes || true
+          gh release create latest OpenDesperados.apk \
+            --prerelease \
+            --target "$GITHUB_SHA" \
+            --title "Latest build (#${{ github.run_number }})" \
+            --notes "Automatic build of commit ${GITHUB_SHA::7}. Install OpenDesperados.apk on your phone. The game data is NOT included: copy your own Desperados folder to the phone's internal storage as /Desperados."
