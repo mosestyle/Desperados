@@ -13,8 +13,9 @@ the original files from your phone's storage.
 | 1. Asset loaders + touch map viewer (level select, pan, pinch-zoom, minimap) | ✅ done |
 | 2. Characters, animals and animated scenery on the map, depth masking | ✅ done |
 | 3. Walkable areas, pathfinding, tap to select / walk, double-tap to run, coloured minimap | ✅ done |
-| 4. Enemy AI: vision cones, patrols, alarm states, personalities | ⏳ next |
-| 5. Mission script VM, abilities, dialogues, sound, the full campaign | ⏳ |
+| 4. Enemy AI: patrols, vision cones, suspicion, alarm, chase, shooting, searching | ✅ first version |
+| 5. Hero abilities (Cooper's colt and knife, ...), ladders/stairs, mission scripts | ⏳ next |
+| 6. Dialogues, sound, HUD, the full campaign | ⏳ |
 
 ## Install on your phone
 
@@ -27,7 +28,9 @@ the original files from your phone's storage.
 
 Controls: tap a hero to select, tap the ground to walk, double-tap to run, double-tap a hero to centre
 on them. Drag to scroll, pinch to zoom, tap or drag the minimap to jump (tap a green dot to select
-that hero). Android back button returns to the level list.
+that hero). Stance button (bottom right): lie down / stand up; moving while down crawls.
+Long-press an enemy to show their field of view (long-press the ground to hide). Android back button
+returns to the level list.
 
 ## Build on a PC
 

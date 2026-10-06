@@ -166,10 +166,19 @@ int App::run() {
                 float hx, hy;
                 if (opt_.viewX >= 0) mv->setView(opt_.viewX, opt_.viewY, opt_.viewZoom > 0 ? opt_.viewZoom : 1.0f);
                 else if (mv->levelData().selectedPosition(hx, hy)) mv->setView(hx, hy, 1.4f);
+                if (opt_.cones) mv->levelData().showAllCones();
+                if (opt_.heroX >= 0) mv->levelData().debugPlaceSelected(opt_.heroX, opt_.heroY);
             }
         }
         screens_.back()->render(renderer_);
-        if (!opt_.shot.empty() && frameCount_ == 40) { saveScreenshot(opt_.shot); running_ = false; }
+        if (!opt_.shot.empty() && frameCount_ % 60 == 0 && frameCount_ < opt_.shotFrame) {
+            char buf[32];
+            SDL_snprintf(buf, sizeof buf, "_%03d.bmp", frameCount_);
+            saveScreenshot(opt_.shot + buf);
+            if (auto* mv = dynamic_cast<MapViewScreen*>(screens_.back().get()))
+                SDL_Log("frame %d: %d enemies alerted", frameCount_, mv->levelData().alertedCount());
+        }
+        if (!opt_.shot.empty() && frameCount_ == opt_.shotFrame) { saveScreenshot(opt_.shot); running_ = false; }
         if (!opt_.autotest.empty()) runAutotestStep(SDL_GetTicks());
         SDL_RenderPresent(renderer_);
     }

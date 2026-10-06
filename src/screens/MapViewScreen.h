@@ -45,4 +45,5 @@ private:
     bool lastTapMoved_ = false;
     uint32_t lastButtonTap_ = 0;
     bool dragFromButton_ = false;
+    float failedT_ = 0;
 };

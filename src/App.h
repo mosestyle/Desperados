@@ -16,6 +16,10 @@ struct AppOptions {
     int width = 1600, height = 720;
     std::string navDump;       // --navdump file.bmp: save the walkable grid of the level
     std::string shot;          // --shot file.bmp: render the level once and save a screenshot
+    int shotFrame = 40;        // --shotframe N: frame at which the screenshot is taken
+    bool cones = false;        // --cones: show every enemy's field of view
+    float heroX = -1, heroY = -1; // --hero x,y: place the selected hero (debug)
+    std::string shotSeries;    // --series prefix: screenshots every 60 frames
     float viewX = -1, viewY = -1, viewZoom = 0;
 };
 

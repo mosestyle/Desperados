@@ -64,6 +64,11 @@ void MapViewScreen::jumpFromMinimap(float x, float y, bool animate) {
 
 void MapViewScreen::onGestures(const std::vector<Gesture>& gs) {
     if (!loaded_) return;
+    if (failedT_ > 2.0f) {  // mission failed: any tap goes back to the level list
+        for (const auto& g : gs)
+            if (g.type == Gesture::Tap) { app_.pop(); return; }
+        return;
+    }
     for (const auto& g : gs) {
         switch (g.type) {
         case Gesture::DragStart:
@@ -100,6 +105,14 @@ void MapViewScreen::onGestures(const std::vector<Gesture>& gs) {
             int hero = level.pickHero(wx, wy, 14.0f * app_.uiScale() / cam_.zoom + 4.0f);
             if (hero >= 0) { level.select(hero); lastTapMoved_ = false; break; }
             lastTapMoved_ = level.moveSelected(wx, wy, false);
+            break;
+        }
+        case Gesture::LongPress: {  // like the original's spyglass: show an enemy's field of view
+            if (inMinimap(g.x, g.y) || inButton(stanceButton(), g.x, g.y)) break;
+            const float wx = cam_.toWorldX(g.x), wy = cam_.toWorldY(g.y);
+            int enemy = level.pickEnemy(wx, wy, 16.0f * app_.uiScale() / cam_.zoom + 4.0f);
+            if (enemy >= 0) level.toggleCone(enemy);
+            else level.hideAllCones();
             break;
         }
         case Gesture::DoubleTap: {
@@ -174,6 +187,7 @@ bool MapViewScreen::selectHeroOnMinimap(float x, float y) {
 void MapViewScreen::update(float dt) {
     cam_.update(dt);
     if (loaded_) level.update(dt);
+    if (loaded_ && level.allHeroesDead()) failedT_ += dt;
 }
 
 void MapViewScreen::render(SDL_Renderer* r) {
@@ -181,6 +195,15 @@ void MapViewScreen::render(SDL_Renderer* r) {
     SDL_RenderClear(r);
     if (!loaded_) return;
     level.render(r, cam_, app_.width(), app_.height());
+
+    if (failedT_ > 0) {  // mission failed: darken the screen in red
+        Uint8 a = (Uint8)std::min(170.0f, failedT_ * 90.0f);
+        SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+        SDL_SetRenderDrawColor(r, 90, 0, 0, a);
+        SDL_Rect all{0, 0, app_.width(), app_.height()};
+        SDL_RenderFillRect(r, &all);
+        return;
+    }
 
     // stance button: shows the posture you switch to (lying figure = get down, standing = get up)
     if (level.selected() >= 0) {

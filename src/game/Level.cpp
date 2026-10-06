@@ -64,6 +64,11 @@ bool Level::load(SDL_Renderer* r, int number) {
             if (!parseMasks(m, n, masks_)) SDL_Log("Level %d: mask data only partly read", number);
         if (const uint8_t* m = file_.chunkData("MOVE", &n))
             if (!parseMotionAreas(m, n, layers_)) SDL_Log("Level %d: motion areas only partly read", number);
+        if (const uint8_t* m = file_.chunkData("WAYS", &n))
+            if (!parsePaths(m, n, paths_)) SDL_Log("Level %d: patrol paths only partly read", number);
+        if (const uint8_t* m = file_.chunkData("SGHT", &n))
+            if (!parseSightObstacles(m, n, sight_)) SDL_Log("Level %d: sight obstacles only partly read", number);
+        profiles_.load();
         nav_.resize(layers_.size());
         for (size_t i = 0; i < layers_.size(); ++i) nav_[i].build(layers_[i], background_.w, background_.h);
 
@@ -103,10 +108,12 @@ bool Level::load(SDL_Renderer* r, int number) {
         }
     }
     recreateTextures(r);
+    initAI();
     selected_ = firstHero();
-    SDL_Log("Level %d: %dx%d, %d elements (%d actors), %d sprite files, %d masks, %d layers, loaded in %u ms", number,
-            background_.w, background_.h, (int)instances_.size(), actorCount(), (int)sprites_.size(),
-            (int)masks_.size(), (int)layers_.size(), SDL_GetTicks() - t0);
+    SDL_Log("Level %d: %dx%d, %d elements (%d actors), %d sprite files, %d masks, %d layers, %d paths, %d sight "
+            "obstacles, loaded in %u ms", number, background_.w, background_.h, (int)instances_.size(), actorCount(),
+            (int)sprites_.size(), (int)masks_.size(), (int)layers_.size(), (int)paths_.size(), (int)sight_.size(),
+            SDL_GetTicks() - t0);
     return true;
 }
 
@@ -121,7 +128,7 @@ int Level::firstHero() const {
     int any = -1;
     for (size_t i = 0; i < instances_.size(); ++i) {
         const auto& in = instances_[i];
-        if (in.el.faction != Faction::Hero) continue;
+        if (in.el.faction != Faction::Hero || in.ai == Instance::AI::Dead) continue;
         if (in.x >= 0 && in.y >= 0 && in.x < width() && in.y < height()) return (int)i;
         if (any < 0) any = (int)i;
     }
@@ -216,10 +223,16 @@ float Level::animSpeed(const SpriteRecord* rec) {
 void Level::startTransition(Instance& in, bool toProne) {
     if (in.prone == toProne) return;
     in.prone = toProne;
-    const int anim = toProne ? kAnimGetDown : kAnimGetUp;
+    playOnce(in, toProne ? kAnimGetDown : kAnimGetUp);
+}
+
+// Plays an animation once; afterwards the actor returns to idle (or stays on the last frame).
+void Level::playOnce(Instance& in, int anim, bool holdLast) {
     const SpriteRecord* rec = in.set->find(anim, in.dir);
-    if (!rec || rec->entries.empty() || rec->anim != anim) {  // no animation: switch directly
-        setAnim(in, toProne ? kAnimProne : kAnimIdle, in.dir);
+    in.holdLast = holdLast;
+    if (!rec || rec->entries.empty() || rec->anim != anim) {  // this character lacks the animation
+        in.transition = -1;
+        if (!holdLast) { in.anim = -1; setAnim(in, in.prone ? kAnimProne : kAnimIdle, in.dir); }
         return;
     }
     in.transition = anim;
@@ -274,6 +287,7 @@ void Level::updateMovement(Instance& in, float dt) {
 
 void Level::update(float dt) {
     time_ += dt;
+    updateAI(dt);
     targetFade_ = std::max(0.0f, targetFade_ - dt * 1.2f);
     const float ticks = dt * kTicksPerSecond;
     for (auto& in : instances_) {
@@ -290,8 +304,10 @@ void Level::update(float dt) {
             }
             if (done) {
                 in.transition = -1;
-                in.anim = -1;
-                setAnim(in, in.prone ? kAnimProne : kAnimIdle, in.dir);
+                if (!in.holdLast) {
+                    in.anim = -1;
+                    setAnim(in, in.prone ? kAnimProne : kAnimIdle, in.dir);
+                }
             }
             updateFrameRect(in);
             continue;
@@ -301,6 +317,7 @@ void Level::update(float dt) {
             updateFrameRect(in);
             continue;
         }
+        if (in.holdLast) continue;  // dead bodies don't breathe
         const auto& entries = in.rec->entries;
         if (entries.size() < 2) continue;
         in.ticks += ticks;
@@ -321,7 +338,7 @@ int Level::pickHero(float wx, float wy, float slack) const {
     float bestD = 1e30f;
     for (size_t i = 0; i < instances_.size(); ++i) {
         const auto& in = instances_[i];
-        if (in.el.faction != Faction::Hero) continue;
+        if (in.el.faction != Faction::Hero || in.ai == Instance::AI::Dead) continue;
         const SDL_Rect& w = in.world;
         if (wx < w.x - slack || wx > w.x + w.w + slack || wy < w.y - slack || wy > w.y + w.h + slack) continue;
         float cx = in.x, cy = in.y - w.h * 0.4f;  // roughly the body centre
@@ -341,7 +358,8 @@ bool Level::selectedPosition(float& x, float& y) const {
 bool Level::moveSelected(float wx, float wy, bool run) {
     if (selected_ < 0 || selected_ >= (int)instances_.size()) return false;
     Instance& in = instances_[selected_];
-    if (in.floor >= (int)nav_.size()) return false;
+    if (in.floor >= (int)nav_.size() || in.ai == Instance::AI::Dead) return false;
+    in.untouched = false;
     std::vector<SDL_FPoint> path;
     if (!nav_[in.floor].findPath({in.x, in.y}, {wx, wy}, path) || path.empty()) return false;
     in.path = std::move(path);
@@ -356,7 +374,8 @@ bool Level::moveSelected(float wx, float wy, bool run) {
 void Level::toggleStanceSelected() {
     if (selected_ < 0 || selected_ >= (int)instances_.size()) return;
     Instance& in = instances_[selected_];
-    if (in.transition >= 0) return;
+    if (in.transition >= 0 || in.ai == Instance::AI::Dead) return;
+    in.untouched = false;
     in.running = false;
     startTransition(in, !in.prone);
 }
@@ -412,6 +431,12 @@ void Level::render(SDL_Renderer* r, const Camera& cam, int sw, int sh) {
         drawEllipse(r, cam, in.x, in.y, 15 * pulse, 7.5f * pulse, {90, 255, 90, 230});
     }
 
+    // enemy fields of view lie on the ground, under everything
+    for (const auto& in : instances_)
+        if (in.ai != Instance::AI::None && in.ai != Instance::AI::Dead &&
+            (in.showCone || in.ai == Instance::AI::Suspicious || in.ai == Instance::AI::Alert))
+            drawCone(r, cam, in);
+
     // painter's order: things whose base is further up the screen are drawn first
     drawOrder_.resize(instances_.size());
     for (size_t i = 0; i < instances_.size(); ++i) drawOrder_[i] = (int)i;
@@ -444,6 +469,7 @@ void Level::render(SDL_Renderer* r, const Camera& cam, int sw, int sh) {
         }
         if (clipped) SDL_RenderSetClipRect(r, nullptr);
     }
+    renderAI(r, cam, sw, sh);  // alarm markers, health bars
 }
 
 bool Level::dumpNav(const std::string& path, int layer) const {

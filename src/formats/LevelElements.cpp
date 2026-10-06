@@ -97,9 +97,22 @@ std::vector<LevelElement> scanElements(const uint8_t* d, size_t size, const Spri
         r.pos = p + 18;
         e.x = r.s16();
         e.y = r.s16();
-        r.skip(6);
+        int hasStartAnim = r.u16();
+        int startAnim = r.u16();
+        r.u16();
         e.floor = r.u8();  // meaning unknown (not the floor); the floor is taken from the motion areas
         e.dir = r.u8() & 15;
+        if (hasStartAnim == 1) e.startAnim = startAnim;
+        if (e.cls == 1) {  // NPC: script class, profile, ..., patrol path
+            size_t len = r.u16();
+            if (len < 64 && r.need(len)) { e.script.assign((const char*)r.here(), len); r.skip(len); }
+            e.profile = r.u16();
+            r.u16();
+            r.u16();
+            r.u16();
+            e.path = r.s16();
+            if (!r.ok) { e.path = -1; r.ok = true; }
+        }
         if (!r.ok) break;
         out.push_back(e);
         o = p;

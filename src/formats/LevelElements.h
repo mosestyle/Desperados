@@ -29,6 +29,9 @@ struct LevelElement {
     std::string file, set;
     int x = 0, y = 0, z = 0;
     int dir = 0, floor = 0;
+    // NPCs: profile id (characters.dat), patrol path index (-1 = none), script class, start animation
+    int profile = 0, path = -1, startAnim = -1;
+    std::string script;
 };
 
 // Known sprite file stems (lower case, without .dvf) per folder.

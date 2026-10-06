@@ -49,9 +49,9 @@ Sequence of chunks `char tag[4]; u32 length; u8 body[length]`. Order in every le
 | `MISC` | general settings | raw |
 | `BGND` | minimap: `u32 ver, u16 len, name, u16 w, u16 h, u32 codec, u32 csize, data` | **decoded** |
 | `MOVE` | walkable areas per floor layer + precomputed search grid (see below) | **areas decoded** |
-| `SGHT` | sight blockers (floats) | todo |
+| `SGHT` | 3D sight obstacles (see below) | **decoded** |
 | `MASK` | depth masks: background pieces drawn in front of characters (see below) | **decoded** |
-| `WAYS` | waypoints / patrol routes (`DVWaypoint`) | todo |
+| `WAYS` | patrol routes with waypoint orders (see below) | **decoded** |
 | `ELEM` | placed elements: characters, objects, animations (`DVElement*`) | positions decoded |
 | `FXBK` | effect bank | todo |
 | `MSIC` | music tracks (`green01.wav`, ...) | todo |
@@ -129,6 +129,34 @@ u32 3, 3 * (float, float)   then the original's precomputed search grid (not nee
 
 The layer count equals the MASK group count. 1,680 of the 1,705 placed actors stand on a
 walkable area; the rest start off-map for scripted entrances or belong to cutscenes.
+
+## NPC record fields (ELEM, class 1)
+
+After `s16 x, s16 y`: `u16 hasStartAnim, u16 startAnim, u16 ?, u8 ?, u8 direction`,
+`u16 len + script class name`, `u16 profile id` (characters.dat), `u16, u16, u16 ?`,
+`s16 patrol path index` (-1 = none), `u16 ?`. Verified: every path index matches the route that
+starts at that NPC's feet.
+
+## Profiles (data/configuration/characters.dat) - decoded
+
+`u16 version 4, u16 count`, then 41-byte records: `s32 id` (heroes negative), `char name[16]`,
+`u8 health, courage, intelligence, attention?, ?, ?, marksmanship, weapon, ...` and behaviour
+percentages. The designers' test profiles ("Courage <= 5", "IQ 100", "Cowboy3 sniper") confirm
+the field meanings.
+
+## Patrol routes (WAYS chunk) - decoded
+
+Loaded by `DVHikingGuide.cpp`: `u32 1, u16 pathCount`, per path `u16 n`, per waypoint:
+`s16 x, s16 y, u16 sector, u16 ?, u8 isScript, u16 len, len bytes`. If isScript = 0 the bytes are
+orders: `u16 1, u8 mode, u16 ?, u16 optionCount, optionCount * (u8 probability, u16 ?)`, then per
+option `u16 len, commands`. Commands: `0x02 u16` face direction, `0x05 s16 x, s16 y` look at,
+`0x07 u16` wait (ticks), `0x81/0x82 f32`, `0x83 u16`, `0x00` end.
+
+## Sight obstacles (SGHT chunk) - decoded
+
+`u32 6, u16 count`, per obstacle: `u16 n, n * (f32 x, f32 y, f32 zBottom, f32 zTop)`, a 6-float
+bounding box, `u8 hasLink [u16, u16]`, 4 flag bytes, 2 floats, `u8` (100), `f32`. All 25 levels
+parse to the exact byte.
 
 ## Depth masks (MASK chunk) - decoded
 
