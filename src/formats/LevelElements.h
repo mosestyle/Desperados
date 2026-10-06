@@ -5,7 +5,8 @@
 // sprite file, followed by a u16-length set name.
 //   scenery (data/animations): s16 x, s16 y (top-left), s16 z (height of its base), 3 flag bytes
 //   actors (data/characters):  u8 hasAlt [, alt file, alt set], 18 bytes collision boxes,
-//                              s16 x, s16 y (feet), 6 bytes, u8 floor, u8 direction (0-15)
+//                              s16 x, s16 y (top-left of the anchor box; feet = +anchor),
+//                              6 bytes, u8 floor, u8 direction (0-15)
 #pragma once
 #include <cstddef>
 #include <cstdint>

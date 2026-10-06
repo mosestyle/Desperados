@@ -97,7 +97,7 @@ Found by signature (u16-length sprite file name + u16-length set name):
 * scenery (`data/animations`): `s16 x, s16 y` (top-left of the anchor box), `s16 z` (height of the
   object's base, used for sorting: base = y+z), 3 flag bytes, optional script link.
 * actors (`data/characters`): `u8 hasAlt [, alt file, alt set]`, two collision boxes
-  (`u8 type + 4 x u16` each), `s16 x, s16 y` (feet), 6 bytes, `u8 floor`, `u8 direction`, then
+  (`u8 type + 4 x u16` each), `s16 x, s16 y` (top-left of the 140x142 anchor box, so the feet are at x+70, y+71), 6 bytes, `u8 floor`, `u8 direction`, then
   type-specific data (script class name, AI profile, ...).
 * `Zombie` = invisible script target, `Accessories` = inventory items.
 

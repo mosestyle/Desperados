@@ -36,12 +36,13 @@ def render(G, lv, idx, out, use_masks=True, crop=None, outline=False):
         if el['kind']=='actor':
             d=el['dir'] if s['ndirs']==16 else 0
             rec=([x for x in s['records'] if x['anim']==0 and x['dir']==d] or s['records'])[0]
-            foot=(el['x'],el['y']); floor=el['posture']
+            floor=el['posture']; foot=None
         else:
             rec=s['records'][0]; foot=None; floor=0
         fr,dur,step,ex,ey,snd=rec['entries'][0]; ax,ay=rec['anchor']
-        img=frame_rgba(b,r['frames'][fr]); x0=el['x']-ax+ex; y0=el['y']-ay+ey
-        if foot is None: foot=(x0+img.shape[1]//2, el['y']+el['z'])
+        img=frame_rgba(b,r['frames'][fr]); x0=el['x']+ex; y0=el['y']+ey      # position = top-left of the anchor box
+        if el['kind']=='actor': foot=(el['x']+ax, el['y']+ay)
+        else: foot=(x0+img.shape[1]//2, el['y']+el['z'])
         draws.append((foot[1],x0,y0,img,foot,floor))
     for sorty,x0,y0,img,foot,floor in sorted(draws,key=lambda t:t[0]):
         hh,ww=img.shape[:2]

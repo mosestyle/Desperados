@@ -130,10 +130,12 @@ void Level::updateFrameRect(Instance& in) {
     const SpriteEntry& e = in.rec->entries[in.entry];
     const auto& frames = in.file->frames();
     int w = e.frame < frames.size() ? frames[e.frame].w : 0, h = e.frame < frames.size() ? frames[e.frame].h : 0;
-    in.world = {in.el.x - in.rec->anchorX + e.x, in.el.y - in.rec->anchorY + e.y, w, h};
+    // The stored position is the top-left corner of the sprite's anchor box;
+    // the anchor point inside that box (70,71 for people) is where the feet are.
+    in.world = {in.el.x + e.x, in.el.y + e.y, w, h};
     if (in.el.kind == LevelElement::Actor) {
-        in.foot = {in.el.x, in.el.y};
-        in.sortY = in.el.y;
+        in.foot = {in.el.x + in.rec->anchorX, in.el.y + in.rec->anchorY};
+        in.sortY = in.foot.y;
     } else {
         in.sortY = in.el.y + in.el.z;
         in.foot = {in.world.x + w / 2, in.sortY};
