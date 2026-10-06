@@ -5,45 +5,35 @@
 
 #include "../App.h"
 
-MapViewScreen::MapViewScreen(App& app, int level) : Screen(app), level_(level) {
-    char path[64];
-    SDL_snprintf(path, sizeof path, "data/levels/level_%02d.dvd", level);
-    std::string name;
-    if (file_.load(path)) file_.readMinimap(name, minimap_);
-    SDL_snprintf(path, sizeof path, "data/levels/level_%02d.dvm", level);
-    std::vector<Image16> imgs;
-    uint32_t t0 = SDL_GetTicks();
-    if (loadImageContainer(path, imgs) && !imgs.empty()) {
-        background_ = std::move(imgs[0]);
-        loaded_ = true;
-        SDL_Log("Level %d background %dx%d loaded in %u ms", level, background_.w, background_.h, SDL_GetTicks() - t0);
-    } else {
-        SDL_Log("Could not load %s", path);
-    }
-    recreateTextures(app.renderer());
+MapViewScreen::MapViewScreen(App& app, int number) : Screen(app), level_(number) {
+    loaded_ = level.load(app.renderer(), number);
+    if (!loaded_) SDL_Log("Could not load level %d", number);
+    if (level.minimap().w > 0) miniTex_ = createTexture16(app.renderer(), level.minimap(), true);
     onResize(app.width(), app.height());
 }
 
-MapViewScreen::~MapViewScreen() { releaseTextures(); }
+MapViewScreen::~MapViewScreen() {
+    if (miniTex_) SDL_DestroyTexture(miniTex_);
+}
 
 void MapViewScreen::releaseTextures() {
-    bgTex_.destroy();
+    level.releaseTextures();
     if (miniTex_) { SDL_DestroyTexture(miniTex_); miniTex_ = nullptr; }
 }
 
 void MapViewScreen::recreateTextures(SDL_Renderer* r) {
     releaseTextures();
-    if (loaded_) bgTex_.create(r, background_);
-    if (minimap_.w > 0) miniTex_ = createTexture16(r, minimap_, true);
+    if (loaded_) level.recreateTextures(r);
+    if (level.minimap().w > 0) miniTex_ = createTexture16(r, level.minimap(), true);
 }
 
 void MapViewScreen::onResize(int w, int h) {
     if (!loaded_) return;
-    cam_.setup(w, h, background_.w, background_.h);
+    cam_.setup(w, h, level.width(), level.height());
     if (firstLayout_) {
         cam_.zoom = cam_.defaultZoom();
-        cam_.cx = background_.w * 0.5f;
-        cam_.cy = background_.h * 0.5f;
+        cam_.cx = level.width() * 0.5f;
+        cam_.cy = level.height() * 0.5f;
         firstLayout_ = false;
     }
     cam_.zoom = std::clamp(cam_.zoom, cam_.minZoom, cam_.maxZoom);
@@ -51,9 +41,9 @@ void MapViewScreen::onResize(int w, int h) {
 }
 
 SDL_FRect MapViewScreen::minimapRect() const {
-    if (minimap_.w <= 0) return {0, 0, 0, 0};
-    float w = std::min(app_.width() * 0.24f, app_.height() * 0.42f * minimap_.w / minimap_.h);
-    float h = w * minimap_.h / minimap_.w;
+    if (level.minimap().w <= 0) return {0, 0, 0, 0};
+    float w = std::min(app_.width() * 0.24f, app_.height() * 0.42f * level.minimap().w / level.minimap().h);
+    float h = w * level.minimap().h / level.minimap().w;
     float m = app_.height() * 0.025f;
     return {app_.width() - w - m, m, w, h};
 }
@@ -67,7 +57,7 @@ bool MapViewScreen::inMinimap(float x, float y) const {
 void MapViewScreen::jumpFromMinimap(float x, float y, bool animate) {
     SDL_FRect rc = minimapRect();
     float u = std::clamp((x - rc.x) / rc.w, 0.0f, 1.0f), v = std::clamp((y - rc.y) / rc.h, 0.0f, 1.0f);
-    float wx = u * background_.w, wy = v * background_.h;
+    float wx = u * level.width(), wy = v * level.height();
     if (animate) cam_.flyTo(wx, wy, cam_.zoom);
     else { cam_.cx = wx; cam_.cy = wy; cam_.vx = cam_.vy = 0; cam_.flying = false; cam_.clamp(); }
 }
@@ -111,13 +101,16 @@ void MapViewScreen::onGestures(const std::vector<Gesture>& gs) {
     }
 }
 
-void MapViewScreen::update(float dt) { cam_.update(dt); }
+void MapViewScreen::update(float dt) {
+    cam_.update(dt);
+    if (loaded_) level.update(dt);
+}
 
 void MapViewScreen::render(SDL_Renderer* r) {
     SDL_SetRenderDrawColor(r, 0, 0, 0, 255);
     SDL_RenderClear(r);
     if (!loaded_) return;
-    bgTex_.draw(r, cam_.originX(), cam_.originY(), cam_.zoom, app_.width(), app_.height());
+    level.render(r, cam_, app_.width(), app_.height());
 
     if (miniTex_) {
         SDL_FRect rc = minimapRect();
@@ -128,7 +121,7 @@ void MapViewScreen::render(SDL_Renderer* r) {
         SDL_RenderFillRectF(r, &back);
         SDL_RenderCopyF(r, miniTex_, nullptr, &rc);
         // current view rectangle
-        float sx = rc.w / background_.w, sy = rc.h / background_.h;
+        float sx = rc.w / level.width(), sy = rc.h / level.height();
         SDL_FRect view{rc.x + cam_.toWorldX(0) * sx, rc.y + cam_.toWorldY(0) * sy,
                        app_.width() / cam_.zoom * sx, app_.height() / cam_.zoom * sy};
         SDL_SetRenderDrawColor(r, 255, 236, 190, 255);

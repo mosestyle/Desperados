@@ -1,0 +1,93 @@
+#include "LevelElements.h"
+
+#include <algorithm>
+#include <cctype>
+
+#include "../core/FileSystem.h"
+#include "ByteReader.h"
+
+static std::string lower(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+    return s;
+}
+
+void SpriteIndex::build() {
+    auto add = [](const std::string& folder, std::unordered_set<std::string>& out) {
+        for (const auto& name : fs_::listDir(folder)) {
+            std::string l = lower(name);
+            if (l.size() > 4 && l.compare(l.size() - 4, 4, ".dvf") == 0) out.insert(l.substr(0, l.size() - 4));
+        }
+    };
+    add("data/characters", characters);
+    add("data/animations", animations);
+}
+
+// Reads a u16-length printable string at `o`; returns false if it doesn't look like one.
+static bool readName(const uint8_t* d, size_t size, size_t o, std::string& out, size_t& next) {
+    if (o + 2 > size) return false;
+    size_t n = d[o] | (d[o + 1] << 8);
+    if (n == 0 || n > 64 || o + 2 + n > size) return false;
+    for (size_t i = 0; i < n; ++i) {
+        uint8_t c = d[o + 2 + i];
+        if (c < 32 || (c >= 127 && c < 0xC0)) return false;
+    }
+    out.assign((const char*)d + o + 2, n);
+    next = o + 2 + n;
+    return true;
+}
+
+std::vector<LevelElement> scanElements(const uint8_t* d, size_t size, const SpriteIndex& index) {
+    std::vector<LevelElement> out;
+    size_t o = 0;
+    while (o + 6 < size) {
+        std::string file, set;
+        size_t afterFile, afterSet;
+        if (!readName(d, size, o, file, afterFile)) { ++o; continue; }
+        const std::string key = lower(file);
+        const bool isChar = index.characters.count(key) != 0, isAnim = index.animations.count(key) != 0;
+        if ((!isChar && !isAnim) || !readName(d, size, afterFile, set, afterSet)) { ++o; continue; }
+
+        LevelElement e;
+        e.file = file;
+        e.set = set;
+        ByteReader r(d, size);
+        if (key == "accessories") {
+            e.kind = LevelElement::Item;
+            e.folder = "characters";
+            out.push_back(e);
+            o = afterSet;
+            continue;
+        }
+        if (isAnim && key != "zombie") {
+            e.kind = LevelElement::Scenery;
+            e.folder = "animations";
+            r.pos = afterSet;
+            e.x = r.s16();
+            e.y = r.s16();
+            e.z = r.s16();
+            if (!r.ok) break;
+            out.push_back(e);
+            o = afterSet;
+            continue;
+        }
+        // actor
+        e.kind = key == "zombie" ? LevelElement::Dummy : LevelElement::Actor;
+        e.folder = "characters";
+        size_t p = afterSet + 1;
+        if (afterSet < size && d[afterSet] == 1) {  // alternative sprite follows
+            std::string altFile, altSet;
+            size_t a1, a2;
+            if (readName(d, size, p, altFile, a1) && readName(d, size, a1, altSet, a2)) p = a2;
+        }
+        r.pos = p + 18;
+        e.x = r.s16();
+        e.y = r.s16();
+        r.skip(6);
+        e.floor = r.u8();
+        e.dir = r.u8() & 15;
+        if (!r.ok) break;
+        out.push_back(e);
+        o = p;
+    }
+    return out;
+}

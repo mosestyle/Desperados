@@ -50,9 +50,9 @@ Sequence of chunks `char tag[4]; u32 length; u8 body[length]`. Order in every le
 | `BGND` | minimap: `u32 ver, u16 len, name, u16 w, u16 h, u32 codec, u32 csize, data` | **decoded** |
 | `MOVE` | walkable sectors / motion areas (`DVSectorMotionArea`) | todo |
 | `SGHT` | sight blockers (floats) | todo |
-| `MASK` | occlusion polygons: what is drawn in front of characters | todo |
+| `MASK` | depth masks: background pieces drawn in front of characters (see below) | **decoded** |
 | `WAYS` | waypoints / patrol routes (`DVWaypoint`) | todo |
-| `ELEM` | placed elements: characters, objects, animations (`DVElement*`) | todo |
+| `ELEM` | placed elements: characters, objects, animations (`DVElement*`) | positions decoded |
 | `FXBK` | effect bank | todo |
 | `MSIC` | music tracks (`green01.wav`, ...) | todo |
 | `SND ` | ambient sound sources | todo |
@@ -67,19 +67,56 @@ Sequence of chunks `char tag[4]; u32 length; u8 body[length]`. Order in every le
 | `CART` | carts / vehicles, cutscene paths | todo |
 | `DLGS` | dialogues | todo |
 
-## Sprites (.dvf) - frames decoded
-
-Header (to be decoded), then frames:
+## Sprites (.dvf) - decoded
 
 ```
-u32 size
-u16 width, u16 height
-u16 unknown (1)
-height x row:  u16 x0, u16 x1 (inclusive), (x1-x0+1) RGB565 pixels
+u16 version (0x200), u16 frameCount, u16 0, u16 maxW, u16 maxH, zero padding up to 0x1E
+frameCount x frame:
+    u32 size (bytes after the next 6), u16 w, u16 h, u16 1
+    h rows: s16 x0, s16 x1 (inclusive; (0,-1) = empty row), (x1-x0+1) RGB565 pixels
+u16 setCount, per set:
+    char name[32], u16 dirCount (16 or 1), 32 bytes ?, u32 animCount, 14 bytes ?,
+    u16 maxW, u16 maxH, u32 anchorX, u32 anchorY, 20 bytes ?
+    animCount*dirCount records (anim-major):
+        u32 ?, u16 entryCount, u16 keyEntry, u16 flags, u32 anchorX, u32 anchorY,
+        u16 dir, u16 animId, char name[32] (French, e.g. "Attendre", "Marcher"),
+        entryCount x { u16 frame, u16 duration (ticks, 25 per second), s16 step (pixels moved),
+                       s16 x, s16 y (frame top-left in the anchor box), u32 event (sound id) }
 ```
 
-`0x001F` (pure blue) inside sprites appears to mark shadow pixels. Animation tables follow
-the frame block (not decoded yet).
+Pixel `0x001F` (blue) = transparent, `0x07C0` (green) = shadow (drawn as translucent black),
+matching the colour-key / alpha-key in the original shader. Characters use an anchor of (70,71) =
+the feet. Direction 0 faces up (north), increasing clockwise in 16 steps. Animation ids are global:
+0 idle, 3 walk, 5 run, 7 lying, 9 crawl, 11 climb ladder, 33 die, ... Files in `data/animations`
+hold several sets (one per animated scenery object of a level). All 154 files / 126,750 frames verified.
+
+## Placed elements (ELEM chunk)
+
+Found by signature (u16-length sprite file name + u16-length set name):
+
+* scenery (`data/animations`): `s16 x, s16 y` (top-left of the anchor box), `s16 z` (height of the
+  object's base, used for sorting: base = y+z), 3 flag bytes, optional script link.
+* actors (`data/characters`): `u8 hasAlt [, alt file, alt set]`, two collision boxes
+  (`u8 type + 4 x u16` each), `s16 x, s16 y` (feet), 6 bytes, `u8 floor`, `u8 direction`, then
+  type-specific data (script class name, AI profile, ...).
+* `Zombie` = invisible script target, `Accessories` = inventory items.
+
+## Depth masks (MASK chunk) - decoded
+
+```
+u32 version, u16 groupCount, per group: u16 count, per mask:
+    u8 flags
+    [flags & 1]    u16 n, n * (s16 x, s16 y)   sort line along the object's base
+    [flags & 2]    u16 n, n points              second line
+    [flags & 0x10] s16 height
+    s16 x, s16 y, s16 w, s16 h, u16 dataSize
+    per row: u8 byteCount, runs: c >= 0x80 -> repeat next byte (c-0x80) times, else copy c bytes
+             (1 bit per pixel, MSB first)
+```
+
+A character whose feet are above (smaller y than) a mask's sort line at its x is behind that
+object, so the masked background pixels are drawn again over the character. Group 0 = ground,
+higher groups match the actor's floor value. 7,377 masks in 25 levels verified.
 
 ## Scripts (.scb)
 

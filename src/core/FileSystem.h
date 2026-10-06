@@ -15,6 +15,9 @@ const std::string& dataRoot();
 // Returns an empty string when the file does not exist.
 std::string resolve(const std::string& relative);
 
+// File names (not paths) inside a data folder, e.g. listDir("data/characters").
+std::vector<std::string> listDir(const std::string& relative);
+
 bool readFile(const std::string& absolutePath, std::vector<uint8_t>& out);
 bool readData(const std::string& relative, std::vector<uint8_t>& out);
 

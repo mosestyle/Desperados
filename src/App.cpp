@@ -155,7 +155,12 @@ int App::run() {
         graveyard_.clear();
         if (screens_.empty()) break;
 
+        if (!opt_.shot.empty() && ++frameCount_ == 3) {
+            if (auto* mv = dynamic_cast<MapViewScreen*>(screens_.back().get()))
+                if (opt_.viewX >= 0) mv->setView(opt_.viewX, opt_.viewY, opt_.viewZoom > 0 ? opt_.viewZoom : 1.0f);
+        }
         screens_.back()->render(renderer_);
+        if (!opt_.shot.empty() && frameCount_ == 40) { saveScreenshot(opt_.shot); running_ = false; }
         if (!opt_.autotest.empty()) runAutotestStep(SDL_GetTicks());
         SDL_RenderPresent(renderer_);
     }

@@ -1,9 +1,10 @@
 #pragma once
+#include <algorithm>
 #include <string>
 
 #include "../formats/Image16.h"
-#include "../formats/LevelFile.h"
 #include "../game/Camera.h"
+#include "../game/Level.h"
 #include "../render/Textures.h"
 #include "Screen.h"
 
@@ -20,6 +21,10 @@ public:
     void recreateTextures(SDL_Renderer* r) override;
 
     const Camera& camera() const { return cam_; }
+    Level& levelData() { return level; }
+    void setView(float cx, float cy, float zoom) {
+        cam_.zoom = std::clamp(zoom, cam_.minZoom, cam_.maxZoom); cam_.cx = cx; cam_.cy = cy; cam_.flying = false; cam_.clamp();
+    }
 
 private:
     SDL_FRect minimapRect() const;
@@ -28,9 +33,7 @@ private:
 
     int level_;
     bool loaded_ = false;
-    LevelFile file_;
-    Image16 background_, minimap_;
-    TiledImage bgTex_;
+    Level level;
     SDL_Texture* miniTex_ = nullptr;
     Camera cam_;
     bool draggingMinimap_ = false;

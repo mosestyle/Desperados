@@ -11,8 +11,8 @@ the original files from your phone's storage.
 | Milestone | State |
 |---|---|
 | 1. Asset loaders + touch map viewer (level select, pan, pinch-zoom, minimap) | ✅ done |
-| 2. Character sprites + animations on the map | ⏳ next |
-| 3. Walkable areas, pathfinding, select & move characters by touch | ⏳ |
+| 2. Characters, animals and animated scenery on the map, depth masking | ✅ done |
+| 3. Walkable areas, pathfinding, select & move characters by touch | ⏳ next |
 | 4. Enemy AI: vision cones, patrols, alarm states, personalities | ⏳ |
 | 5. Mission script VM, abilities, dialogues, sound, the full campaign | ⏳ |
 

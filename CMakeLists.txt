@@ -46,6 +46,11 @@ set(SOURCES
     src/formats/Decompress.cpp
     src/formats/Image16.cpp
     src/formats/LevelFile.cpp
+    src/formats/LevelElements.cpp
+    src/formats/Masks.cpp
+    src/formats/SpriteFile.cpp
+    src/game/Level.cpp
+    src/render/SpriteAtlas.cpp
     src/input/TouchInput.cpp
     src/render/Textures.cpp
     src/screens/LevelSelectScreen.cpp

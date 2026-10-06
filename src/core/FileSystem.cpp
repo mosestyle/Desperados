@@ -66,6 +66,16 @@ std::string resolve(const std::string& relative) {
     return r;
 }
 
+std::vector<std::string> listDir(const std::string& relative) {
+    std::vector<std::string> names;
+    std::string dir = resolve(relative);
+    if (dir.empty()) return names;
+    std::error_code ec;
+    for (stdfs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec))
+        names.push_back(it->path().filename().string());
+    return names;
+}
+
 bool readFile(const std::string& path, std::vector<uint8_t>& out) {
     SDL_RWops* rw = SDL_RWFromFile(path.c_str(), "rb");
     if (!rw) return false;

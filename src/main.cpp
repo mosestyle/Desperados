@@ -17,7 +17,11 @@ int main(int argc, char* argv[]) {
         if (a == "--data") opt.dataPath = next("");
         else if (a == "--level") opt.startLevel = std::atoi(next("0").c_str());
         else if (a == "--autotest") opt.autotest = next("autotest");
-        else if (a == "--size") {
+        else if (a == "--shot") opt.shot = next("shot.bmp");
+        else if (a == "--view") {  // x,y,zoom
+            std::string v = next("0,0,1");
+            SDL_sscanf(v.c_str(), "%f,%f,%f", &opt.viewX, &opt.viewY, &opt.viewZoom);
+        } else if (a == "--size") {
             std::string s = next("1600x720");
             size_t x = s.find('x');
             if (x != std::string::npos) { opt.width = std::atoi(s.c_str()); opt.height = std::atoi(s.c_str() + x + 1); }
