@@ -21,6 +21,9 @@ struct MotionArea {
 
 struct MotionLayer {
     std::vector<MotionArea> areas;
+    int polygonCount = 0;  // outlines + holes; areas are numbered ("sectors") over all layers
+    int firstSector = 0;
+    bool liftLayer = false;  // holds only the outlines of stairs / ladders (see Lifts.h)
     bool walkable(float x, float y) const;
 };
 

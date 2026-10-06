@@ -12,6 +12,7 @@
 #include "../formats/Image16.h"
 #include "../formats/LevelElements.h"
 #include "../formats/LevelFile.h"
+#include "../formats/Lifts.h"
 #include "../formats/Masks.h"
 #include "../formats/MotionAreas.h"
 #include "../formats/Paths.h"
@@ -59,6 +60,7 @@ public:
     // Stance: standing <-> lying (crawling when moving). Plays the get-down / stand-up animation.
     void toggleStanceSelected();
     bool selectedProne() const;
+    bool selectedIdle() const;  // not walking, climbing or busy with an order
     // Draws a frame of the selected hero's sprite fitted into `box` (used for HUD buttons).
     void drawSelectedFrame(SDL_Renderer* r, SDL_FRect box, int anim, int dir, int entry = -1);
 
@@ -163,12 +165,27 @@ private:
         int postDir = -1;
         std::map<int, int> animSwap; // ReplaceAnim
         bool invisible = false;      // script target without a picture (knife-throwing targets...)
+        // route over several floors: walks and lift traversals (stairs, ladders, walls)
+        struct Leg { int lift = -1; bool forward = true; float x = 0, y = 0; int floor = 0; };
+        std::vector<Leg> route;
+        size_t routeIdx = 0;
+        int lift = -1;               // lift being traversed
+        bool liftFwd = true;
+        float liftPos = 0;           // distance travelled along liftPts
+        std::vector<SDL_FPoint> liftPts;
         SDL_Rect box{0, 0, 0, 0};    // hit box of scripted objects
     };
     const SpriteFile* sprite(const std::string& folder, const std::string& file);
     void updateFrameRect(Instance& in);
     void setAnim(Instance& in, int anim, int dir);
     void updateMovement(Instance& in, float dt);
+    // floors and lifts
+    int floorForPoint(float x, float y, int prefer) const;
+    int sectorAt(int layer, float x, float y) const;
+    bool planRoute(Instance& in, float x, float y, int floor, std::vector<Instance::Leg>& legs) const;
+    bool routeTo(Instance& in, float x, float y, int floor, bool run);
+    bool startLeg(Instance& in);
+    void updateLift(Instance& in, float dt);
     void startTransition(Instance& in, bool toProne);
     static float animSpeed(const SpriteRecord* rec);
     void playOnce(Instance& in, int anim, bool holdLast = false);
@@ -231,7 +248,7 @@ private:
     int heroBySub(int sub) const;
     int postureOf(const Instance& in) const;
     void setPosture(Instance& in, int posture);
-    void moveActor(Instance& in, float x, float y, bool run);
+    void moveActor(Instance& in, float x, float y, int floor, bool run);
     void showHint(int idx);
     void updateZones();
     void updateMusic(float dt);
@@ -289,6 +306,7 @@ private:
     std::vector<Mask> masks_;
     std::vector<SDL_Texture*> maskTex_;
     std::vector<MotionLayer> layers_;
+    std::vector<Lift> lifts_;
     std::vector<PatrolPath> paths_;
     std::vector<SightObstacle> sight_;
     ProfileTable profiles_;

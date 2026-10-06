@@ -43,6 +43,8 @@ float asFloat(int32_t v) { float f; std::memcpy(&f, &v, 4); return f; }
 const char* kHeroNames[6] = {"Cooper", "Sam", "Doc", "Kate", "Sanchez", "Mia"};
 }  // namespace
 
+static bool scriptLog() { static int on = SDL_getenv("DESP_SCRIPTLOG") ? 1 : 0; return on != 0; }
+
 // ------------------------------------------------------------------------------------------
 // handles
 
@@ -64,7 +66,7 @@ int Level::floorAt(float x, float y, bool upper) const {
     const int n = (int)layers_.size();
     for (int k = 0; k < n; ++k) {
         int l = upper ? n - 1 - k : k;
-        if (layers_[l].walkable(x, y)) return l;
+        if (!layers_[l].liftLayer && layers_[l].walkable(x, y)) return l;
     }
     return 0;
 }
@@ -78,7 +80,7 @@ bool Level::locationOf(int32_t h, float& x, float& y, int& floor) {
         SDL_FPoint c = zones_[i].isPoint() ? SDL_FPoint{(float)zones_[i].pts[0].x, (float)zones_[i].pts[0].y} : zones_[i].centre();
         x = c.x;
         y = c.y;
-        floor = floorAt(x, y, zones_[i].flag != 0);
+        floor = zones_[i].flag < (int)layers_.size() && !layers_[zones_[i].flag].liftLayer ? zones_[i].flag : floorAt(x, y, false);
         return true;
     }
     case kDyn: {
@@ -127,6 +129,8 @@ void Level::place(Instance& in, float x, float y, int floor) {
     in.floor = std::clamp(floor, 0, std::max(0, (int)layers_.size() - 1));
     in.path.clear();
     in.pathIdx = 0;
+    in.route.clear();
+    in.lift = -1;
     if (in.floor < (int)nav_.size() && !nav_[in.floor].walkableAt(x, y)) {
         SDL_FPoint p;
         if (nav_[in.floor].nearestWalkable({x, y}, p, 6)) { in.x = p.x; in.y = p.y; }
@@ -135,11 +139,13 @@ void Level::place(Instance& in, float x, float y, int floor) {
     if (in.el.faction == Faction::Hero && selected_ < 0) selected_ = (int)(&in - &instances_[0]);
 }
 
-void Level::moveActor(Instance& in, float x, float y, bool run) {
+void Level::moveActor(Instance& in, float x, float y, int floor, bool run) {
     in.running = run;
     in.path.clear();
     in.pathIdx = 0;
+    in.route.clear();
     if (in.prone && run) startTransition(in, false);
+    if (floor != in.floor && routeTo(in, x, y, floor, run)) return;
     if (in.floor < (int)nav_.size() && nav_[in.floor].findPath({in.x, in.y}, {x, y}, in.path) && !in.path.empty()) return;
     in.path.clear();
     in.path.push_back({x, y});
@@ -267,8 +273,6 @@ int32_t Level::callScript(int s, const char* fn, const std::vector<int32_t>& arg
     return r;
 }
 
-static bool scriptLog() { static int on = SDL_getenv("DESP_SCRIPTLOG") ? 1 : 0; return on != 0; }
-
 void Level::sendEvent(int e, int32_t id) {
     if (scriptLog()) SDL_Log("[%5.1f] event %d -> element %d (%s)", time_, id, e,
                              e >= 0 && e < (int)elemScript_.size() && elemScript_[e] >= 0 ? scripts_[elemScript_[e]].cls->name.c_str() : "-");
@@ -327,7 +331,7 @@ bool Level::startAction(SeqAction& s) {
         if (!in || in->hidden) return true;
         if (!locationOf(s.a[1], x, y, fl)) { if (s.type != A_Move) hide(*in); return true; }
         in->seqBusy++;
-        moveActor(*in, x, y, s.a[2] != 0);
+        moveActor(*in, x, y, fl, s.a[2] != 0);
         s.t = 0;
         return false;
     }
@@ -336,7 +340,7 @@ bool Level::startAction(SeqAction& s) {
         if (locationOf(s.a[1], x, y, fl)) place(*in, x, y, fl);
         if (!locationOf(s.a[2], x, y, fl)) return true;
         in->seqBusy++;
-        moveActor(*in, x, y, s.a[3] != 0);
+        moveActor(*in, x, y, fl, s.a[3] != 0);
         return false;
     }
     case A_TurnTo:
@@ -493,6 +497,8 @@ void Level::updateZones() {
             const bool now = !in.hidden && zones_[z].contains(in.x, in.y);
             if (now == (inside[e] != 0)) continue;
             inside[e] = now;
+            if (scriptLog() && in.el.faction == Faction::Hero)
+                SDL_Log("[%5.1f] %s %s %s", time_, in.el.set.c_str(), now ? "enters" : "leaves", zones_[z].script.c_str());
             callScript(zoneScript_[z], now ? "EnterZone" : "ExitZone", {kActor + (int32_t)e});
         }
     }

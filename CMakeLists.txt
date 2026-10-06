@@ -51,6 +51,7 @@ set(SOURCES
     src/formats/TextResource.cpp
     src/formats/Image16.cpp
     src/formats/LevelFile.cpp
+    src/formats/Lifts.cpp
     src/formats/LevelElements.cpp
     src/formats/Masks.cpp
     src/formats/MotionAreas.cpp
@@ -62,6 +63,7 @@ set(SOURCES
     src/game/Level.cpp
     src/game/LevelAI.cpp
     src/game/LevelCombat.cpp
+    src/game/LevelFloors.cpp
     src/game/LevelScript.cpp
     src/game/ScriptVM.cpp
     src/game/NavGrid.cpp

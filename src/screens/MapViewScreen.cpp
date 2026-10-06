@@ -258,6 +258,34 @@ void MapViewScreen::update(float dt) {
         cam_.clamp();
     }
     objectivesT_ = std::max(0.0f, objectivesT_ - dt);
+    static bool moveReached = SDL_getenv("DESP_TESTMOVE") == nullptr;
+    if (const char* t = SDL_getenv("DESP_TESTMOVE")) {  // "x,y" once control is given: walk there (any floor)
+        static bool done = false;
+        static float delay = SDL_getenv("DESP_TESTDELAY") ? (float)SDL_atof(SDL_getenv("DESP_TESTDELAY")) : 0.0f;
+        float x, y;
+        if (!level.userLocked() && level.firstHero() >= 0) delay -= dt;
+        static int tries = 0;
+        static float retry = 0;
+        retry -= dt;
+        float hx0, hy0;
+        if (done && tries < 6 && retry <= 0 && !level.userLocked() && level.selectedIdle() && level.selectedPosition(hx0, hy0) &&
+            SDL_sscanf(t, "%f,%f", &x, &y) == 2 && std::hypot(hx0 - x, hy0 - y) > 12) {
+            done = false;  // interrupted by a cutscene: order again
+            ++tries;
+        }
+        if (!done && delay <= 0 && !level.userLocked() && level.firstHero() >= 0 && SDL_sscanf(t, "%f,%f", &x, &y) == 2) {
+            done = true;
+            retry = 3.0f;
+            if (level.selected() < 0) level.select(level.firstHero());
+            if (SDL_getenv("DESP_TESTPRONE") && !level.selectedProne()) level.toggleStanceSelected();
+            SDL_Log("debug: move to %.0f,%.0f: %s", x, y, level.moveSelected(x, y, false) ? "ok" : "refused");
+        }
+        float hx, hy;
+        if (done && level.selectedPosition(hx, hy)) { cam_.cx = hx; cam_.cy = hy; cam_.clamp(); }
+        if (done && level.selectedPosition(hx, hy) && SDL_sscanf(t, "%f,%f", &x, &y) == 2 && std::hypot(hx - x, hy - y) <= 12 &&
+            level.selectedIdle() && !level.userLocked())
+            moveReached = true;
+    }
     if (const char* t = SDL_getenv("DESP_TESTATTACK")) {  // "elem,action[;elem,action...]" once control is given
         static size_t step = 0;
         static float wait = 0;
@@ -269,10 +297,9 @@ void MapViewScreen::update(float dt) {
             if (*p) ++p;
         }
         wait -= dt;
-        if (!level.userLocked() && wait <= 0 && step < list.size()) {
-            level.debugAttackElement(list[step].first, (Level::Action)list[step].second);
-            ++step;
-            wait = 8.0f;
+        if (moveReached && !level.userLocked() && level.firstHero() >= 0 && wait <= 0 && step < list.size()) {
+            if (level.debugAttackElement(list[step].first, (Level::Action)list[step].second)) { ++step; wait = 8.0f; }
+            else wait = 2.0f;
         }
     }
     if (level.allHeroesDead()) failedT_ += dt;

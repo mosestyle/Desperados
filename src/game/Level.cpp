@@ -70,6 +70,12 @@ bool Level::load(SDL_Renderer* r, int number) {
             if (!parseMotionAreas(m, n, layers_)) SDL_Log("Level %d: motion areas only partly read", number);
         if (const uint8_t* m = file_.chunkData("WAYS", &n))
             if (!parsePaths(m, n, paths_)) SDL_Log("Level %d: patrol paths only partly read", number);
+        if (const uint8_t* m = file_.chunkData("LIFT", &n)) {
+            if (!parseLifts(m, n, lifts_)) SDL_Log("Level %d: lifts only partly read", number);
+            for (const Lift& l : lifts_)  // the layer holding the lifts' own outlines is not a floor
+                for (auto& layer : layers_)
+                    if (l.sector >= layer.firstSector && l.sector < layer.firstSector + layer.polygonCount) layer.liftLayer = true;
+        }
         if (const uint8_t* m = file_.chunkData("SGHT", &n))
             if (!parseSightObstacles(m, n, sight_)) SDL_Log("Level %d: sight obstacles only partly read", number);
         profiles_.load();
@@ -107,7 +113,7 @@ bool Level::load(SDL_Renderer* r, int number) {
                     in.y = (float)(el.y + in.rec->anchorY);
                     in.floor = 0;
                     for (size_t l = 0; l < layers_.size(); ++l)
-                        if (layers_[l].walkable(in.x, in.y)) { in.floor = (int)l; break; }
+                        if (!layers_[l].liftLayer && layers_[l].walkable(in.x, in.y)) { in.floor = (int)l; break; }
                 } else {
                     in.rec = in.set->records.empty() ? nullptr : &in.set->records.front();
                 }
@@ -304,6 +310,7 @@ void Level::updateMovement(Instance& in, float dt) {
     if (in.pathIdx >= in.path.size()) {
         in.path.clear();
         in.pathIdx = 0;
+        if (!in.route.empty() && startLeg(in)) return;  // next leg: a ladder, stairs, another floor
         setAnim(in, in.prone ? kAnimProne : kAnimIdle, in.dir);
     }
 }
@@ -335,6 +342,11 @@ void Level::update(float dt) {
                 }
                 if (in.pending) applyPending(in);
             }
+            updateFrameRect(in);
+            continue;
+        }
+        if (in.lift >= 0) {
+            updateLift(in, dt);
             updateFrameRect(in);
             continue;
         }
@@ -386,14 +398,21 @@ bool Level::moveSelected(float wx, float wy, bool run) {
     Instance& in = instances_[selected_];
     if (in.floor >= (int)nav_.size() || in.ai == Instance::AI::Dead) return false;
     in.untouched = false;
-    std::vector<SDL_FPoint> path;
-    if (!nav_[in.floor].findPath({in.x, in.y}, {wx, wy}, path) || path.empty()) return false;
-    in.path = std::move(path);
-    in.pathIdx = 0;
+    const int floor = floorForPoint(wx, wy, in.floor);
+    if (floor == in.floor && in.lift < 0 && sectorAt(floor, in.x, in.y) == sectorAt(floor, wx, wy)) {
+        std::vector<SDL_FPoint> path;
+        if (!nav_[in.floor].findPath({in.x, in.y}, {wx, wy}, path) || path.empty()) return false;
+        in.route.clear();
+        in.path = std::move(path);
+        in.pathIdx = 0;
+        target_ = in.path.back();
+    } else {
+        if (!routeTo(in, wx, wy, floor, run)) return false;
+        target_ = {wx, wy};
+    }
     in.running = run;
     in.order = Action::None;  // a new move cancels an attack order
     if (run && in.prone) startTransition(in, false);  // running means standing up first
-    target_ = in.path.back();
     targetFade_ = 1.0f;
     return true;
 }
@@ -407,6 +426,12 @@ void Level::toggleStanceSelected() {
     in.order = Action::None;
     in.drawn = false;
     startTransition(in, !in.prone);
+}
+
+bool Level::selectedIdle() const {
+    if (selected_ < 0 || selected_ >= (int)instances_.size()) return false;
+    const Instance& in = instances_[selected_];
+    return in.path.empty() && in.lift < 0 && in.order == Action::None && in.transition < 0;
 }
 
 bool Level::selectedProne() const {

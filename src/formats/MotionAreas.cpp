@@ -37,7 +37,8 @@ bool parseMotionAreas(const uint8_t* data, size_t size, std::vector<MotionLayer>
     int layerCount = r.u16();
     for (int l = 0; l < layerCount && r.ok; ++l) {
         MotionLayer layer;
-        r.u16();  // total polygon count
+        layer.polygonCount = r.u16();
+        layer.firstSector = layers.empty() ? 0 : layers.back().firstSector + layers.back().polygonCount;
         int areaCount = r.u16();
         for (int a = 0; a < areaCount && r.ok; ++a) {
             MotionArea area;

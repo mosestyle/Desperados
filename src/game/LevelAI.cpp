@@ -105,6 +105,7 @@ bool Level::canSee(const Instance& e, const Instance& h, bool& nearZone, float& 
 void Level::walkTo(Instance& e, float x, float y, bool run, bool direct) {
     e.running = run;
     e.path.clear();
+    e.route.clear();
     e.pathIdx = 0;
     if (direct || e.floor >= (int)nav_.size()) {
         e.path.push_back({x, y});

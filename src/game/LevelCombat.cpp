@@ -149,6 +149,7 @@ bool Level::orderAttack(Action a, int targetIdx) {
     h.orderTarget = targetIdx;
     h.orderRepath = 0;
     h.path.clear();
+    h.route.clear();
     return true;
 }
 
