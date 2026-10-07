@@ -19,3 +19,7 @@ localisation/
 *.dvf
 *.scb
 *.ogv
+
+# research notes derived from third-party sources, kept local
+tools/natives.json
+tools/natives_sig.txt
