@@ -3,6 +3,10 @@ name: Build Android APK
 on:
   push:
     branches: [main]
+    # the original-game app has its own workflow and release
+    paths-ignore:
+      - 'android-box/**'
+      - '.github/workflows/original.yml'
   workflow_dispatch:
 
 permissions:

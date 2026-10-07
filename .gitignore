@@ -23,3 +23,14 @@ localisation/
 # research notes derived from third-party sources, kept local
 tools/natives.json
 tools/natives_sig.txt
+
+# original-game app: downloaded / built in CI
+android-box/SDL/
+android-box/.gradle/
+android-box/build/
+android-box/app/build/
+android-box/app/.cxx/
+android-box/app/src/main/java/org/libsdl/
+android-box/app/src/main/jniLibs/
+android-box/app/src/main/assets/x86lib/
+android-box/box64-src/
