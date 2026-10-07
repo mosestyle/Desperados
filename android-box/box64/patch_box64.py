@@ -104,6 +104,22 @@ patch("src/wrapped32/wrappedlibc.c", """    posix_spawn_file_actions_t* dst = d;
     dst->__allocated = src->__allocated;
 #endif""")
 
+
+# mallochook.c is compiled out on Android, but Box32 still needs its allocators that keep the
+# 32-bit program's memory below 4 GB: reuse that block of the file in the Android branch.
+mh = root / "src/mallochook.c"
+t = mh.read_text()
+start = t.find("#ifdef BOX32\nint isCustomAddr(void* p);")
+end = t.find("#endif", start)
+if start < 0 or end < 0:
+    sys.exit("patch_box64: box32 allocators not found in mallochook.c")
+block = t[start:end + len("#endif")].replace("malloc_trim(0);", "").replace("box_malloc_usable_size(", "malloc_usable_size(")
+anchor = "#else//ANDROID\n"
+if anchor not in t:
+    sys.exit("patch_box64: Android branch not found in mallochook.c")
+t = t.replace(anchor, anchor + block + "\n", 1)
+mh.write_text(t)
+
 # bionic lacks some glibc headers Box32 needs for structure layouts
 import shutil
 compat = pathlib.Path(__file__).parent / "compat"
