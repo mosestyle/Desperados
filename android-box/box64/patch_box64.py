@@ -29,4 +29,9 @@ patch("src/box64context.c", "context->box64lib = dlopen(NULL, RTLD_NOW|RTLD_GLOB
       "context->box64lib = dlopen(\"libbox64.so\", RTLD_NOW|RTLD_GLOBAL);\n"
       "    if(!context->box64lib) context->box64lib = dlopen(NULL, RTLD_NOW|RTLD_GLOBAL);")
 patch("src/wrapped/wrappedsdl2.c", 'const char* sdl2Name = "libSDL2-2.0.so.0";', 'const char* sdl2Name = "libSDL2.so";')
+# bionic lacks some glibc headers Box32 needs for structure layouts
+import shutil
+compat = pathlib.Path(__file__).parent / "compat"
+for h in compat.glob("*.h"):
+    shutil.copy(h, root / "src" / "include" / h.name)
 print("box64 patched for in-app use")
