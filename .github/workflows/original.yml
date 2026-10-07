@@ -1,0 +1,128 @@
+name: Build original-game APK
+
+# The original Linux build of Desperados, run on the phone through Box64 (Box32 mode).
+# Published as its own release ("original-test") so the rebuilt-engine "latest" release stays.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'android-box/**'
+      - '.github/workflows/original.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  SDL_VERSION: 2.30.9
+  BOX64_COMMIT: 2f47bdff3ae9b3b7fb462fea0579cd3e87551e75
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # ---- Box64 as an in-app library ----
+      - name: Get Box64
+        run: |
+          mkdir -p android-box/box64-src && cd android-box/box64-src
+          git init -q && git remote add origin https://github.com/ptitSeb/box64
+          git fetch -q --depth 1 origin "$BOX64_COMMIT" && git checkout -q FETCH_HEAD
+          python3 ../box64/patch_box64.py .
+
+      - name: Cache Box64 build
+        id: box64-cache
+        uses: actions/cache@v4
+        with:
+          path: build-box64/libbox64.so
+          key: box64-${{ env.BOX64_COMMIT }}-${{ hashFiles('android-box/box64/patch_box64.py') }}
+
+      - name: Build Box64 (Box32) for Android
+        if: steps.box64-cache.outputs.cache-hit != 'true'
+        run: |
+          NDK="$ANDROID_NDK_LATEST_HOME"
+          cmake -S android-box/box64-src -B build-box64 \
+            -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-28 \
+            -DANDROID=ON -DARM_DYNAREC=ON -DBOX32=ON -DNOLOADADDR=ON \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo > box64-cmake.log 2>&1 || { tail -50 box64-cmake.log; exit 1; }
+          set -o pipefail
+          make -C build-box64 -j"$(nproc)" 2>&1 | tee box64-build.log | grep -E "error|warning: implicit" | head -50 || true
+          test -f build-box64/libbox64.so || { grep -B2 -A6 "error" box64-build.log | head -120; exit 1; }
+          "$NDK"/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip --strip-debug build-box64/libbox64.so
+          ls -la build-box64/libbox64.so
+
+      - name: Put Box64 and the x86 runtime into the app
+        run: |
+          mkdir -p android-box/app/src/main/jniLibs/arm64-v8a android-box/app/src/main/assets/x86lib
+          cp build-box64/libbox64.so android-box/app/src/main/jniLibs/arm64-v8a/
+          cp android-box/box64-src/x86lib/libstdc++.so.6 android-box/box64-src/x86lib/libgcc_s.so.1 android-box/app/src/main/assets/x86lib/
+
+      # ---- SDL2, patched to create OpenGL ES 3 contexts ----
+      - name: Get SDL2
+        run: |
+          curl -sSL "https://github.com/libsdl-org/SDL/releases/download/release-${SDL_VERSION}/SDL2-${SDL_VERSION}.tar.gz" | tar xz
+          mv "SDL2-${SDL_VERSION}" android-box/SDL
+          python3 android-box/sdl/patch_sdl.py android-box/SDL
+          rm -rf android-box/SDL/android-project/gradle android-box/SDL/android-project/gradlew*
+          mkdir -p android-box/app/src/main/java/org/libsdl
+          cp -r android-box/SDL/android-project/app/src/main/java/org/libsdl/app android-box/app/src/main/java/org/libsdl/
+
+      - name: Install Android CMake
+        run: |
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          for i in 1 2 3 4; do
+            if yes | "$SDKM" --install "cmake;3.22.1" > /dev/null; then echo "CMake installed"; break; fi
+            echo "Retry $i"; rm -rf "$ANDROID_HOME/cmake/3.22.1"; sleep 10
+          done
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+          validate-wrappers: false
+
+      - name: Build APK
+        working-directory: android-box
+        run: |
+          NDK_ARG=""
+          if [ -n "$ANDROID_NDK_LATEST_HOME" ]; then NDK_ARG="-PndkVersion=$(basename "$ANDROID_NDK_LATEST_HOME")"; fi
+          set -o pipefail
+          gradle assembleRelease --no-daemon $NDK_ARG -PversionCode=${{ github.run_number }} 2>&1 | tee ../build.log
+
+      - name: Report build errors
+        if: failure()
+        run: |
+          for f in build.log box64-build.log box64-cmake.log; do
+            [ -f "$f" ] || continue
+            { grep -E "error:|error :|undefined reference|CMake Error|FAILED" "$f" | head -n 40;
+              grep -A 10 "What went wrong" "$f" | head -n 30; } > errors.txt || true
+            [ -s errors.txt ] || continue
+            echo "::error title=$f::$(sed 's/%/%25/g' errors.txt | awk '{printf "%s%%0A", $0}')"
+          done
+
+      - name: Collect APK
+        run: |
+          cp android-box/app/build/outputs/apk/release/app-release.apk DesperadosOriginal.apk
+          ls -la DesperadosOriginal.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DesperadosOriginal-build-${{ github.run_number }}
+          path: DesperadosOriginal.apk
+
+      - name: Publish test build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete original-test --cleanup-tag --yes || true
+          gh release create original-test DesperadosOriginal.apk \
+            --prerelease \
+            --target "$GITHUB_SHA" \
+            --title "Original game test build (#${{ github.run_number }})" \
+            --notes "Runs the ORIGINAL Linux version of Desperados through Box64. Installs as a separate app ('Desperados Original'); the rebuilt-engine app and its 'latest' release are untouched. Copy the Linux game folder (with desperados32, data, bootmenu, shaders) to the phone's internal storage as /Desperados and allow 'all files access'. A log is written to Desperados/android-log.txt."
