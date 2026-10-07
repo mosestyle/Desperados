@@ -53,11 +53,12 @@ android {
         }
     }
 
-    // libbox64.so is loaded with dlopen at run time: keep the libraries as plain files on disk
+    // The game process runs from these files (Box64, glibc, its SDL2 and bridge libGL): keep them
+    // as plain files on disk, exactly as built
     packagingOptions {
         jniLibs {
             useLegacyPackaging true
-            keepDebugSymbols += ['**/libbox64.so']
+            keepDebugSymbols += ['**/libbox64g.so', '**/libglibc_*.so', '**/libchild_*.so']
         }
     }
 

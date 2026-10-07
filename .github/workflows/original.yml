@@ -1,6 +1,7 @@
 name: Build original-game APK
 
-# The original Linux build of Desperados, run on the phone through Box64 (Box32 mode).
+# The original Linux build of Desperados, run on the phone in its own process through Box64
+# (Box32 mode, glibc), drawn by the app through the bridge (android-box/bridge).
 # Published as its own release ("original-test") so the rebuilt-engine "latest" release stays.
 on:
   push:
@@ -28,51 +29,81 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      # ---- Box64 as an in-app library ----
-      - name: Get Box64
+      - name: ARM64 Linux cross compilers
         run: |
-          mkdir -p android-box/box64-src && cd android-box/box64-src
-          git init -q && git remote add origin https://github.com/ptitSeb/box64
-          git fetch -q --depth 1 origin "$BOX64_COMMIT" && git checkout -q FETCH_HEAD
-          python3 ../box64/patch_box64.py .
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu g++-aarch64-linux-gnu > /dev/null
 
-      - name: Cache Box64 build
+      # ---- the game process: Box64 (glibc, Box32), SDL2 (offscreen video, pipe audio), bridge libGL ----
+      - name: Cache Box64
         id: box64-cache
         uses: actions/cache@v4
         with:
-          path: build-box64/libbox64.so
-          key: box64-${{ env.BOX64_COMMIT }}-${{ hashFiles('android-box/box64/patch_box64.py') }}
+          path: build-box64/box64
+          key: box64-glibc-a64-${{ env.BOX64_COMMIT }}
 
-      - name: Build Box64 (Box32) for Android
+      - name: Build Box64
         if: steps.box64-cache.outputs.cache-hit != 'true'
         run: |
-          NDK="$ANDROID_NDK_LATEST_HOME"
-          cmake -S android-box/box64-src -B build-box64 \
-            -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
-            -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-28 \
-            -DANDROID=ON -DARM_DYNAREC=ON -DBOX32=ON -DNOLOADADDR=ON \
-            -DCMAKE_BUILD_TYPE=RelWithDebInfo > box64-cmake.log 2>&1 || { tail -50 box64-cmake.log; exit 1; }
-          # -k: collect every compile error of a broken build in one go
-          make -k -C build-box64 -j"$(nproc)" > box64-build.log 2>&1 || true
-          if [ ! -f build-box64/libbox64.so ]; then
-            grep -E "error:|undefined (reference|symbol)" box64-build.log | sed 's|.*/box64-src/||' | sort | uniq | head -150
-            exit 1
-          fi
-          "$NDK"/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip --strip-debug build-box64/libbox64.so
-          ls -la build-box64/libbox64.so
+          mkdir box64-src && cd box64-src
+          git init -q && git remote add origin https://github.com/ptitSeb/box64
+          git fetch -q --depth 1 origin "$BOX64_COMMIT" && git checkout -q FETCH_HEAD
+          cd ..
+          cmake -S box64-src -B build-box64 -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++ \
+            -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64 -DARM_DYNAREC=ON -DBOX32=ON \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo > box64-cmake.log 2>&1 || { tail -40 box64-cmake.log; exit 1; }
+          make -C build-box64 -j"$(nproc)" > box64-build.log 2>&1 || { grep -E "error" box64-build.log | head -60; exit 1; }
+          aarch64-linux-gnu-strip --strip-debug build-box64/box64
+          ls -la build-box64/box64
 
-      - name: Put Box64 and the x86 runtime into the app
+      - name: Get Box64's x86 runtime libraries
         run: |
-          mkdir -p android-box/app/src/main/jniLibs/arm64-v8a android-box/app/src/main/assets/x86lib
-          cp build-box64/libbox64.so android-box/app/src/main/jniLibs/arm64-v8a/
-          cp android-box/box64-src/x86lib/libstdc++.so.6 android-box/box64-src/x86lib/libgcc_s.so.1 android-box/app/src/main/assets/x86lib/
+          [ -d box64-src ] || { mkdir box64-src && cd box64-src && git init -q && git remote add origin https://github.com/ptitSeb/box64 \
+            && git fetch -q --depth 1 origin "$BOX64_COMMIT" && git checkout -q FETCH_HEAD; }
+          mkdir -p android-box/app/src/main/assets/x86lib
+          cp "$GITHUB_WORKSPACE"/box64-src/x86lib/libstdc++.so.6 "$GITHUB_WORKSPACE"/box64-src/x86lib/libgcc_s.so.1 android-box/app/src/main/assets/x86lib/
 
-      # ---- SDL2, patched to create OpenGL ES 3 contexts ----
       - name: Get SDL2
         run: |
           curl -sSL "https://github.com/libsdl-org/SDL/releases/download/release-${SDL_VERSION}/SDL2-${SDL_VERSION}.tar.gz" | tar xz
+          cp -r "SDL2-${SDL_VERSION}" child-sdl
           mv "SDL2-${SDL_VERSION}" android-box/SDL
-          python3 android-box/sdl/patch_sdl.py android-box/SDL
+
+      - name: Build the game process's SDL2
+        run: |
+          python3 android-box/child/patch_child_sdl.py child-sdl
+          cmake -S child-sdl -B build-child-sdl -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc -DCMAKE_SYSTEM_NAME=Linux \
+            -DCMAKE_SYSTEM_PROCESSOR=aarch64 -DCMAKE_BUILD_TYPE=Release -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TEST=OFF \
+            -DSDL_X11=OFF -DSDL_WAYLAND=OFF -DSDL_KMSDRM=OFF -DSDL_VULKAN=OFF -DSDL_OFFSCREEN=ON -DSDL_DUMMYVIDEO=ON \
+            -DSDL_OPENGL=ON -DSDL_OPENGLES=ON -DSDL_PULSEAUDIO=OFF -DSDL_ALSA=OFF -DSDL_PIPEWIRE=OFF -DSDL_JACK=OFF \
+            -DSDL_SNDIO=OFF -DSDL_OSS=OFF -DSDL_DISKAUDIO=ON -DSDL_DUMMYAUDIO=ON -DSDL_LIBUDEV=OFF -DSDL_DBUS=OFF \
+            -DSDL_IBUS=OFF -DSDL_HIDAPI=OFF -DSDL_LIBSAMPLERATE=OFF > child-sdl.log 2>&1 || { tail -40 child-sdl.log; exit 1; }
+          make -C build-child-sdl -j"$(nproc)" > child-sdl-build.log 2>&1 || { grep error child-sdl-build.log | head -40; exit 1; }
+
+      - name: Build the bridge libGL / libEGL
+        run: |
+          aarch64-linux-gnu-gcc -shared -fPIC -O2 -fvisibility=hidden -Wall -o libchild_gl.so android-box/bridge/child_gl.c -Wl,-soname,libGL.so.1 -ldl
+          echo 'void desp_egl_placeholder(void) {}' > egl.c
+          aarch64-linux-gnu-gcc -shared -fPIC -O2 -o libchild_egl.so egl.c -Wl,-soname,libEGL.so.1 -Wl,--no-as-needed -L. -l:libchild_gl.so
+          aarch64-linux-gnu-readelf -d libchild_egl.so | grep NEEDED
+
+      - name: Put the game process's files into the app
+        run: |
+          J=android-box/app/src/main/jniLibs/arm64-v8a
+          mkdir -p $J
+          cp build-box64/box64 $J/libbox64g.so
+          cp -L build-child-sdl/libSDL2-2.0.so.0 $J/libchild_sdl2.so
+          cp libchild_gl.so libchild_egl.so $J/
+          G=/usr/aarch64-linux-gnu/lib
+          cp -L $G/ld-linux-aarch64.so.1 $J/libglibc_ld.so
+          for l in c:libc.so.6 m:libm.so.6 pthread:libpthread.so.0 dl:libdl.so.2 rt:librt.so.1 resolv:libresolv.so.2 util:libutil.so.1 gcc_s:libgcc_s.so.1; do
+            cp -L "$G/${l#*:}" "$J/libglibc_${l%%:*}.so"
+          done
+          ls -la $J
+
+      # ---- the app ----
+      - name: Add SDL's Java glue
+        run: |
           rm -rf android-box/SDL/android-project/gradle android-box/SDL/android-project/gradlew*
           mkdir -p android-box/app/src/main/java/org/libsdl
           cp -r android-box/SDL/android-project/app/src/main/java/org/libsdl/app android-box/app/src/main/java/org/libsdl/
@@ -101,17 +132,15 @@ jobs:
       - name: Report build errors
         if: failure()
         run: |
-          for f in build.log box64-build.log box64-cmake.log; do
-            [ -f "$f" ] || continue
-            { grep -E "error:|error :|undefined reference|CMake Error|FAILED" "$f" | head -n 40;
-              grep -A 10 "What went wrong" "$f" | head -n 30; } > errors.txt || true
-            [ -s errors.txt ] || continue
-            echo "::error title=$f::$(sed 's/%/%25/g' errors.txt | awk '{printf "%s%%0A", $0}')"
-          done
+          [ -f build.log ] || exit 0
+          { grep -E "error:|error :|undefined reference|CMake Error|FAILED" build.log | head -n 40;
+            grep -A 10 "What went wrong" build.log | head -n 30; } > errors.txt || true
+          [ -s errors.txt ] && echo "::error title=build::$(sed 's/%/%25/g' errors.txt | awk '{printf "%s%%0A", $0}')" || true
 
       - name: Collect APK
         run: |
           cp android-box/app/build/outputs/apk/release/app-release.apk DesperadosOriginal.apk
+          unzip -l DesperadosOriginal.apk | grep -E "\.so|x86lib"
           ls -la DesperadosOriginal.apk
 
       - uses: actions/upload-artifact@v4
@@ -128,4 +157,4 @@ jobs:
             --prerelease \
             --target "$GITHUB_SHA" \
             --title "Original game test build (#${{ github.run_number }})" \
-            --notes "Runs the ORIGINAL Linux version of Desperados through Box64. Installs as a separate app ('Desperados Original'); the rebuilt-engine app and its 'latest' release are untouched. Copy the Linux game folder (with desperados32, data, bootmenu, shaders) to the phone's internal storage as /Desperados and allow 'all files access'. A log is written to Desperados/android-log.txt."
+            --notes "Runs the ORIGINAL Linux version of Desperados through Box64 in its own process, drawn and controlled by the app. Installs as a separate app ('Desperados Original'); the rebuilt-engine app and its 'latest' release are untouched. Copy the Linux game folder (with desperados32, data, bootmenu, shaders, localisation) to the phone's internal storage as /Desperados and allow 'all files access'. Touch: tap = click, long press = right click, drag = move the cursor, back = Escape. A log is written to Desperados/android-log.txt."
