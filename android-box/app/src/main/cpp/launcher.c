@@ -137,7 +137,8 @@ static int audioThread(void* arg) {
 // ---------------------------------------------------------------------------------------------
 
 static pid_t startGame(const char* game, const char* libDir, const char* linkDir, const char* x86Dir,
-                       const char* fifo, const char* userDir, int sock, int logFd, int gw, int gh) {
+                       const char* fifo, const char* userDir, const char* rcFile, const char* runDir,
+                       int sock, int logFd, int gw, int gh) {
     char ld[600], box[600], exe[600], ldPath[1200];
     snprintf(ld, sizeof ld, "%s/libglibc_ld.so", libDir);
     snprintf(box, sizeof box, "%s/libbox64g.so", libDir);
@@ -149,7 +150,10 @@ static pid_t startGame(const char* game, const char* libDir, const char* linkDir
     snprintf(e[n++], 700, "BOX64_LD_LIBRARY_PATH=%s", x86Dir);
     snprintf(e[n++], 700, "BOX64_LOG=1");
     snprintf(e[n++], 700, "BOX64_SHOWSEGV=1");
-    snprintf(e[n++], 700, "BOX64_NORCFILES=1");
+    // Box64 needs a settings file: without one it falls back to a shared-memory file, which
+    // Android doesn't have, and then crashes while starting (seen as a crash right after it
+    // prints the CPU info)
+    snprintf(e[n++], 700, "BOX64_RCFILE=%s", rcFile);
     snprintf(e[n++], 700, "BOX64_NOBANNER=0");
     snprintf(e[n++], 700, "DESP_BRIDGE_FD=%d", sock);
     snprintf(e[n++], 700, "DESP_GAME_EXE=%s", exe);
@@ -163,6 +167,7 @@ static pid_t startGame(const char* game, const char* libDir, const char* linkDir
     snprintf(e[n++], 700, "GLIBC_TUNABLES=glibc.pthread.rseq=0");
     snprintf(e[n++], 700, "PATH=/system/bin");
     snprintf(e[n++], 700, "LANG=C");
+    snprintf(e[n++], 700, "XDG_RUNTIME_DIR=%s", runDir);
     char* envp[25];
     for (int i = 0; i < n; ++i) envp[i] = e[i];
     envp[n] = NULL;
@@ -266,7 +271,7 @@ int SDL_main(int argc, char* argv[]) {
     logf_("screen %dx%d, game window %dx%d", sw, sh, gw, gh);
 
     // runtime files
-    char libDir[512], files[512], linkDir[600], x86Dir[600], fifo[600], userDir[600];
+    char libDir[512], files[512], linkDir[600], x86Dir[600], fifo[600], userDir[600], rcFile[600];
     nativeLibDir(libDir, sizeof libDir);
     snprintf(files, sizeof files, "%s", SDL_AndroidGetInternalStoragePath());
     snprintf(linkDir, sizeof linkDir, "%s/rt", files);
@@ -291,13 +296,21 @@ int SDL_main(int argc, char* argv[]) {
         snprintf(dst, sizeof dst, "%s/libgcc_s.so.1", x86Dir);
         copyAsset("x86lib/libgcc_s.so.1", dst);
     }
+    snprintf(rcFile, sizeof rcFile, "%s/box64.box64rc", files);
+    {
+        FILE* f = fopen(rcFile, "w");
+        if (f) {
+            fputs("# Box64 settings for the game process\n[desperados32]\nBOX64_DYNAREC_BIGBLOCK=1\n", f);
+            fclose(f);
+        } else logf_("can't write %s: %s", rcFile, strerror(errno));
+    }
     unlink(fifo);
     if (mkfifo(fifo, 0600) != 0) logf_("mkfifo: %s", strerror(errno));
 
     int sv[2];
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) { say("Desperados", "socketpair failed"); return 1; }
     logf_("starting the game process (libraries in %s)", libDir);
-    pid_t pid = startGame(game, libDir, linkDir, x86Dir, fifo, userDir, sv[1], logFd, gw, gh);
+    pid_t pid = startGame(game, libDir, linkDir, x86Dir, fifo, userDir, rcFile, files, sv[1], logFd, gw, gh);
     close(sv[1]);
     if (pid < 0) { say("Desperados", "Couldn't start the game process."); return 1; }
     SDL_CreateThread(audioThread, "audio", fifo);
