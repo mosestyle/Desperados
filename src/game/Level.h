@@ -32,7 +32,8 @@
 class Level : public ScriptHost {
 public:
     struct ActorDot { float x, y; Faction faction; bool selected; };
-    enum class Action { None, Gun, Melee, Throw, Knife };  // Melee = punch / kick (knocks out)
+    // Melee = punch / kick (knocks out). PickUp and Ride are given by tapping an item / a horse.
+    enum class Action { None, Gun, Melee, Throw, Knife, Watch, PickUp, Ride };
 
     ~Level();
     void stopMusic();
@@ -73,6 +74,13 @@ public:
     float selectedGunRange() const;
     bool reloadSelected();  // reload the gun (the original: click on the grey cartridges)
     int selectedAmmo(int* maxAmmo = nullptr) const;
+    // --- items and horses (LevelItems.cpp) ---
+    int pickItem(float wx, float wy, float slack) const;    // item lying on the map or a horse, -1 if none
+    bool orderUse(int targetIdx);                          // pick up the item / saddle or mount the horse
+    bool orderWatch(float wx, float wy);                   // Cooper puts his musical watch down there
+    bool selectedMounted() const;
+    bool dismountSelected();
+    int bagCount(int heroIdx, int itemType) const;
     void drawRange(SDL_Renderer* r, const Camera& cam, float range, SDL_Color c);
     int firstHero() const;
     bool showMasks = true;
@@ -182,6 +190,21 @@ private:
         SDL_Rect box{0, 0, 0, 0};    // hit box of scripted objects
         int building = -1;           // inside this building (out of sight)
         float doorWait = 0;          // time left crossing the inside of a building
+        // items (accessories): lying on the map, or hidden while in a hero's bag / carried
+        int itemType = -1;
+        int carrier = -1;            // hero carrying it (saddle), -1 = none
+        int onHorse = -1;            // saddle: the horse it is on
+        float itemT = 0;             // watch: time since it was put down
+        std::map<int, int> bag;      // hero: item type -> count (knife, watch, dynamite...)
+        int carrying = -1;           // hero: item instance carried in the arms (saddle)
+        // horses
+        int horse = -1;              // rider: the horse ridden
+        int rider = -1;              // horse: its rider
+        int saddle = -1;             // horse: its saddle item
+        // NPCs lured by Cooper's watch
+        int lure = -1;               // the ringing watch being investigated
+        float lureT = 0;
+        float orderX = 0, orderY = 0;  // hero order on a ground point (watch)
     };
     const SpriteFile* sprite(const std::string& folder, const std::string& file);
     void updateFrameRect(Instance& in);
@@ -230,6 +253,16 @@ private:
     void killEnemy(Instance& e);
     void knockOut(Instance& e);
     void hurtEnemy(Instance& e, int damage, int heroIdx);
+    // items and horses (LevelItems.cpp)
+    void initItems();
+    void updateItems(float dt);
+    bool updateLure(Instance& e, float dt);    // NPC drawn to a ringing watch; true while busy with it
+    void followRider(Instance& rider);         // horse and saddle under a mounted hero
+    int restAnim(const Instance& in) const;    // idle animation (standing, lying, on horseback)
+    int moveAnim(const Instance& in) const;    // walking / running / crawling / riding animation
+    bool useTarget(Instance& h, int idx, float dt);  // hero order PickUp / Ride; true when done
+    void dropItem(int item, float x, float y, int floor);
+    int watchRinging(const Instance& w) const;  // 0 silent, 1 ringing
     void drawEllipse(SDL_Renderer* r, const Camera& cam, float x, float y, float rx, float ry, SDL_Color c);
     // scripting (LevelScript.cpp)
     struct SeqAction {

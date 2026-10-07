@@ -65,6 +65,7 @@ set(SOURCES
     src/game/LevelAI.cpp
     src/game/LevelCombat.cpp
     src/game/LevelFloors.cpp
+    src/game/LevelItems.cpp
     src/game/LevelScript.cpp
     src/game/ScriptVM.cpp
     src/game/NavGrid.cpp

@@ -68,10 +68,18 @@ std::vector<LevelElement> scanElements(const uint8_t* d, size_t size, const Spri
 
         ByteReader r(d, size);
         if (key == "accessories" || e.cls == 0x11) {
+            // u8 0, u8 carried, s16 linked element; carried: u16 count, else s16 x, s16 y, u16 floor, u16 sector
             e.kind = LevelElement::Item;
             e.folder = "characters";
+            r.pos = afterSet;
+            r.u8();
+            e.carried = r.u8() != 0;
+            e.link = r.s16();
+            if (e.carried) e.count = r.u16();
+            else { e.x = r.s16(); e.y = r.s16(); e.floor = r.u16(); r.u16(); }
+            if (!r.ok) break;
             out.push_back(e);
-            o = afterSet;
+            o = r.pos;
             continue;
         }
         if (!asActor) {

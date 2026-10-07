@@ -105,7 +105,7 @@ bool Level::load(SDL_Renderer* r, int number) {
                 elemKind_.push_back(el.kind);
                 elemCls_.push_back(el.cls);
                 const bool target = el.kind == LevelElement::Dummy && el.cls == 8;  // invisible script target
-                if (el.kind != LevelElement::Actor && el.kind != LevelElement::Scenery && !target) continue;
+                if (el.kind != LevelElement::Actor && el.kind != LevelElement::Scenery && el.kind != LevelElement::Item && !target) continue;
                 Instance in;
                 in.el = el;
                 in.elem = (int)ei;
@@ -116,7 +116,14 @@ bool Level::load(SDL_Renderer* r, int number) {
                 in.set = in.file->set(el.set);
                 if (!in.set && !in.file->sets().empty()) in.set = &in.file->sets().front();
                 if (!in.set) continue;
-                if (el.kind == LevelElement::Actor) {
+                if (el.kind == LevelElement::Item) {  // see initItems()
+                    in.itemType = el.sub;
+                    in.rec = in.set->records.empty() ? nullptr : &in.set->records.front();
+                    in.x = (float)el.x;
+                    in.y = (float)el.y;
+                    in.floor = std::clamp(el.floor, 0, std::max(0, (int)layers_.size() - 1));
+                    in.hidden = el.carried;
+                } else if (el.kind == LevelElement::Actor) {
                     in.dir = in.set->dirCount >= 16 ? el.dir : 0;
                     in.rec = in.set->find(kAnimIdle, in.dir);
                     if (!in.rec) continue;
@@ -221,9 +228,11 @@ void Level::updateFrameRect(Instance& in) {
     const SpriteEntry& e = in.rec->entries[in.entry];
     const auto& frames = in.file->frames();
     int w = e.frame < frames.size() ? frames[e.frame].w : 0, h = e.frame < frames.size() ? frames[e.frame].h : 0;
-    if (in.el.kind == LevelElement::Actor) {
+    if (in.el.kind == LevelElement::Actor || in.el.kind == LevelElement::Item) {
         in.world = {(int)std::lround(in.x) - in.rec->anchorX + e.x, (int)std::lround(in.y) - in.rec->anchorY + e.y, w, h};
         in.sortY = (int)std::lround(in.y);
+        if (in.rider >= 0) in.sortY -= 2;                          // a horse under its rider
+        if (in.onHorse >= 0 || in.carrier >= 0) in.sortY += in.carrier >= 0 ? 1 : -1;  // saddle
     } else {
         in.world = {in.el.x + e.x, in.el.y + e.y, w, h};
         in.sortY = in.el.y + in.el.z;
@@ -273,7 +282,7 @@ void Level::playOnce(Instance& in, int anim, bool holdLast) {
     in.holdLast = holdLast;
     if (!rec || rec->entries.empty() || rec->anim != anim) {  // this character lacks the animation
         in.transition = -1;
-        if (!holdLast) { in.anim = -1; setAnim(in, in.prone ? kAnimProne : kAnimIdle, in.dir); }
+        if (!holdLast) { in.anim = -1; setAnim(in, restAnim(in), in.dir); }
         return;
     }
     in.transition = anim;
@@ -284,7 +293,7 @@ void Level::playOnce(Instance& in, int anim, bool holdLast) {
 }
 
 void Level::updateMovement(Instance& in, float dt) {
-    const int moveAnim = in.prone ? kAnimCrawl : (in.running ? kAnimRun : kAnimWalk);
+    const int moveAnim = this->moveAnim(in);
     float budget = animSpeed(in.set->find(moveAnim, in.dir)) * dt;  // ground distance this frame
     while (budget > 0 && in.pathIdx < in.path.size()) {
         const SDL_FPoint wp = in.path[in.pathIdx];
@@ -324,7 +333,7 @@ void Level::updateMovement(Instance& in, float dt) {
         in.path.clear();
         in.pathIdx = 0;
         if (!in.route.empty() && startLeg(in)) return;  // next leg: a ladder, stairs, another floor
-        setAnim(in, in.prone ? kAnimProne : kAnimIdle, in.dir);
+        setAnim(in, restAnim(in), in.dir);
     }
 }
 
@@ -351,7 +360,7 @@ void Level::update(float dt) {
                 in.transition = -1;
                 if (!in.holdLast) {
                     in.anim = -1;
-                    setAnim(in, in.prone ? kAnimProne : kAnimIdle, in.dir);
+                    setAnim(in, restAnim(in), in.dir);
                 }
                 if (in.pending) applyPending(in);
             }
@@ -362,7 +371,7 @@ void Level::update(float dt) {
             in.doorWait -= dt;
             if (in.doorWait <= 0) {
                 in.doorWait = 0;
-                if (!startLeg(in)) setAnim(in, in.prone ? kAnimProne : kAnimIdle, in.dir);
+                if (!startLeg(in)) setAnim(in, restAnim(in), in.dir);
                 updateFrameRect(in);
             }
             continue;

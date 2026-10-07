@@ -34,6 +34,10 @@ struct LevelElement {
     std::string script;
     size_t offset = 0;  // where the element's file name starts in the ELEM chunk
     int boxX1 = 0, boxY1 = 0;  // scripted objects: bottom-right of the hit box (top-left = x,y)
+    // items (accessories.dvf): type = sub; in a hero's bag (count) or lying on the map (x, y, floor);
+    // a saddle can be on a horse (link = the horse's element index)
+    bool carried = false;
+    int count = 0, link = -1;
 };
 
 // Known sprite file stems (lower case, without .dvf) per folder.
