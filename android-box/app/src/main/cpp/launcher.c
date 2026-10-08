@@ -147,6 +147,7 @@ static pid_t startGame(const char* game, const char* libDir, const char* linkDir
     char e[24][700];
     int n = 0;
     snprintf(e[n++], 700, "LD_LIBRARY_PATH=%s", linkDir);
+    snprintf(e[n++], 700, "LD_PRELOAD=%s/libchild_sigsys.so", libDir);  // see child/sigsys.c
     snprintf(e[n++], 700, "BOX64_LD_LIBRARY_PATH=%s", x86Dir);
     snprintf(e[n++], 700, "BOX64_LOG=1");
     snprintf(e[n++], 700, "BOX64_SHOWSEGV=1");
@@ -386,8 +387,12 @@ int SDL_main(int argc, char* argv[]) {
         int got = desp_replay_frame(r, 8);
         if (got == 0) {
             int status = 0;
-            waitpid(pid, &status, WNOHANG);
-            logf_("the game process ended (status %#x) after %d frames", status, frames);
+            for (int i = 0; i < 20 && waitpid(pid, &status, WNOHANG) == 0; ++i) SDL_Delay(50);
+            if (WIFSIGNALED(status))
+                logf_("the game process was stopped by signal %d (%s) after %d frames", WTERMSIG(status),
+                      WTERMSIG(status) == SIGSYS ? "a system call Android doesn't allow" : strsignal(WTERMSIG(status)), frames);
+            else
+                logf_("the game process ended (exit code %d, status %#x) after %d frames", WEXITSTATUS(status), status, frames);
             say("Desperados", frames ? "The game has ended." :
                 "The game couldn't start. The details are in Desperados/android-log.txt.");
             break;

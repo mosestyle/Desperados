@@ -86,6 +86,7 @@ jobs:
           echo 'void desp_egl_placeholder(void) {}' > egl.c
           aarch64-linux-gnu-gcc -shared -fPIC -O2 -o libchild_egl.so egl.c -Wl,-soname,libEGL.so.1 -Wl,--no-as-needed -L. -l:libchild_gl.so
           aarch64-linux-gnu-readelf -d libchild_egl.so | grep NEEDED
+          aarch64-linux-gnu-gcc -shared -fPIC -O2 -Wall -o libchild_sigsys.so android-box/child/sigsys.c
 
       - name: Put the game process's files into the app
         run: |
@@ -93,12 +94,14 @@ jobs:
           mkdir -p $J
           cp build-box64/box64 $J/libbox64g.so
           cp -L build-child-sdl/libSDL2-2.0.so.0 $J/libchild_sdl2.so
-          cp libchild_gl.so libchild_egl.so $J/
+          cp libchild_gl.so libchild_egl.so libchild_sigsys.so $J/
           G=/usr/aarch64-linux-gnu/lib
           cp -L $G/ld-linux-aarch64.so.1 $J/libglibc_ld.so
           for l in c:libc.so.6 m:libm.so.6 pthread:libpthread.so.0 dl:libdl.so.2 rt:librt.so.1 resolv:libresolv.so.2 util:libutil.so.1 gcc_s:libgcc_s.so.1; do
             cp -L "$G/${l#*:}" "$J/libglibc_${l%%:*}.so"
           done
+          # Android's seccomp filter kills a process that calls set_robust_list: make glibc skip it
+          python3 android-box/child/patch_glibc.py $J/libglibc_*.so
           ls -la $J
 
       # ---- the app ----
