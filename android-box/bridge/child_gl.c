@@ -167,7 +167,7 @@ typedef struct { uint32_t type, timestamp, windowID; uint8_t state, repeat, p2, 
 
 // Addresses of a few of the game's globals, from its symbol table (the Linux build keeps it):
 // in-process they are plain memory (Box64 maps the 32-bit program at its own addresses).
-static struct { int resolved; uintptr_t bootMode, bootX, bootY, winW, winH, gamePos, clipBox, mouseFactor; } gsym;
+static struct { int resolved; uintptr_t bootMode, bootX, bootY, winW, winH, gamePos, clipBox, mouseFactor, engine; } gsym;
 
 static void resolveGameSymbols(void) {
     if (gsym.resolved) return;
@@ -210,6 +210,7 @@ static void resolveGameSymbols(void) {
             else if (!strcmp(n, "_ZN15SBThreadedInput14mpointPositionE")) gsym.gamePos = value;
             else if (!strcmp(n, "_ZN15SBThreadedInput12mboxClippingE")) gsym.clipBox = value;
             else if (!strcmp(n, "desperados_mouse_factor")) gsym.mouseFactor = value;
+            else if (!strcmp(n, "_ZN8DVEngine8mpEngineE")) gsym.engine = value;
         }
         free(strs);
         free(syms);
@@ -266,10 +267,89 @@ static void mouseTo(int x, int y) {
     pushMotion((int)(gx / factor + 0.5), (int)(gy / factor + 0.5));
 }
 
+// Where the game's picture sits in its window (it draws black bars around it itself):
+// the boot menu is a 1920x1080 picture, the game a picture of its chosen size (mboxClipping).
+static int windowSize(int* w, int* h) {
+    resolveGameSymbols();
+    *w = gsym.winW ? *(volatile int32_t*)gsym.winW : winWidth();
+    *h = gsym.winH ? *(volatile int32_t*)gsym.winH : winHeight();
+    if (*w <= 0 || *h <= 0) { *w = winWidth(); *h = winHeight(); }
+    return *w > 0 && *h > 0;
+}
+static void pictureSize(double* pw, double* ph) {
+    int bootMode = gsym.bootMode ? *(volatile int32_t*)gsym.bootMode : 1;
+    *pw = 1920; *ph = 1080;
+    if (!bootMode) return;
+    *pw = 0; *ph = 0;
+    if (gsym.clipBox) {
+        const volatile float* c = (const volatile float*)gsym.clipBox;
+        *pw = c[2] - c[0];
+        *ph = c[3] - c[1];
+    }
+}
+static void viewRect(int r[4]) {
+    int w, h;
+    windowSize(&w, &h);
+    double pw, ph;
+    pictureSize(&pw, &ph);
+    if (pw < 1 || ph < 1) { r[0] = 0; r[1] = 0; r[2] = w; r[3] = h; return; }
+    double s = (double)w / pw < (double)h / ph ? (double)w / pw : (double)h / ph;
+    r[2] = (int)(pw * s + 0.5);
+    r[3] = (int)(ph * s + 0.5);
+    r[0] = (w - r[2]) / 2;
+    r[1] = (h - r[3]) / 2;
+}
+
+// Camera of a mission: DVEngine (DVEngine::mpEngine, null outside missions) keeps the view's
+// top-left corner in world pixels at +0xb4c/+0xb50, the map size at +0xbb8/+0xbbc, the screen
+// size at +0xbb0/+0xbb4 and the zoom at +0xbc0 (see DVEngine::PerformCheckScroll and
+// DVScript::SetCameraJumpTo, which also clears the follow flag at +0xb92).
+static int panCamera(double dxWin, double dyWin) {
+    resolveGameSymbols();
+    if (!gsym.engine) return 0;
+    uint8_t* e = (uint8_t*)(uintptr_t)*(volatile uint32_t*)gsym.engine;
+    if (!e) return 0;
+    volatile float* cam = (volatile float*)(e + 0xb4c);
+    float mapW = *(volatile float*)(e + 0xbb8), mapH = *(volatile float*)(e + 0xbbc);
+    float scrW = *(volatile float*)(e + 0xbb0), scrH = *(volatile float*)(e + 0xbb4), zoom = *(volatile float*)(e + 0xbc0);
+    if (!(zoom > 0.01f && zoom < 100) || !(scrW > 1) || !(mapW > 1) || !(mapH > 1)) return 0;
+    int r[4];
+    viewRect(r);
+    double pw, ph;
+    pictureSize(&pw, &ph);
+    if (pw < 1 || r[2] < 1) return 0;
+    // window pixels -> picture pixels -> world pixels
+    double k = (pw / r[2]) * ((scrW / zoom) / pw);
+    double x = cam[0] - dxWin * k, y = cam[1] - dyWin * k;
+    double maxX = mapW - scrW / zoom, maxY = mapH - (int)((scrH - 40) / zoom);
+    if (x > maxX) x = maxX;
+    if (y > maxY) y = maxY;
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    cam[0] = (float)x;
+    cam[1] = (float)y;
+    *(volatile uint8_t*)(e + 0xb92) = 0;
+    return 1;
+}
+
+static int lastView[4];
+static void sendViewRect(void) {
+    int r[4];
+    viewRect(r);
+    if (!memcmp(r, lastView, sizeof r)) return;
+    memcpy(lastView, r, sizeof r);
+    uint8_t* p = msg(OP_VIEW_RECT, 16);
+    PUT(p, r[0]); PUT(p, r[1]); PUT(p, r[2]); PUT(p, r[3]);
+}
+
 static void deliverInput(const desp_input* in) {
     if (!pushEvent) pushEvent = (int (*)(void*))dlsym(RTLD_DEFAULT, "SDL_PushEvent");
     if (!pushEvent) return;
     if (in->type == IN_MOUSE_TO) { mouseTo(in->x, in->y); return; }
+    if (in->type == IN_PAN) {
+        if (!panCamera(in->dx / 16.0, in->dy / 16.0)) mouseTo(in->x, in->y);
+        return;
+    }
     fake_event ev;
     memset(&ev, 0, sizeof ev);
     switch (in->type) {
@@ -319,6 +399,7 @@ static void sendFocus(void) {
 
 static int frameNo;
 E void desp_frame_end(void) {
+    sendViewRect();
     send0(OP_FRAME_END);
     flushOut();
     ++framesInFlight;

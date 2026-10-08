@@ -231,6 +231,7 @@ typedef struct {
     SDL_FingerID id;
     int active, dragged, longFired;
     float sx, sy;          // where it went down (screen px)
+    float lx, ly;          // where the last drag step was sent from (screen px)
     Uint32 downAt;
 } touch_t;
 
@@ -492,13 +493,29 @@ int SDL_main(int argc, char* argv[]) {
             case SDL_FINGERMOTION:
                 if (!t.active || ev.tfinger.fingerId != t.id) break;
                 {
+                    // a drag moves the camera in a mission (the picture follows the finger),
+                    // and the cursor in the menus
                     float x = ev.tfinger.x * sw, y = ev.tfinger.y * sh;
-                    float dx = x - t.sx, dy = y - t.sy, slop = sh * 0.03f;
-                    if (dx * dx + dy * dy > slop * slop) t.dragged = 1;
-                    if (t.dragged) {
-                        int gx, gy;
+                    float dx = x - t.sx, dy = y - t.sy, slop = sh * 0.02f;
+                    if (!t.dragged && dx * dx + dy * dy > slop * slop) {
+                        t.dragged = 1;
+                        t.lx = t.sx;
+                        t.ly = t.sy;
+                    }
+                    if (t.dragged && rect[2] > 0 && rect[3] > 0) {
+                        int gw, gh, gx, gy;
+                        desp_replay_game_size(replay, &gw, &gh);
                         toGame(replay, rect, sh, x, y, &gx, &gy);
-                        sendMouse(replay, IN_MOUSE_TO, gx, gy, 0);
+                        desp_input in;
+                        memset(&in, 0, sizeof in);
+                        in.type = IN_PAN;
+                        in.x = gx;
+                        in.y = gy;
+                        in.dx = (int32_t)((x - t.lx) * gw / rect[2] * 16);
+                        in.dy = (int32_t)((y - t.ly) * gh / rect[3] * 16);
+                        t.lx = x;
+                        t.ly = y;
+                        desp_replay_send_input(replay, &in);
                     }
                 }
                 break;

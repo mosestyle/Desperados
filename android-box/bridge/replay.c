@@ -50,6 +50,7 @@ struct desp_replay {
     GLuint blitProg, blitVao, blitVbo;
     int haveFrame;
     unsigned long long bytes, commands;
+    int view[4], hasView;  // the game's picture inside its window (top-left origin), see OP_VIEW_RECT
 };
 
 static GLuint* nameSlot(desp_replay* r, uint32_t n) {
@@ -223,6 +224,11 @@ static void execute(desp_replay* r, uint16_t op, uint8_t* p, uint32_t len) {
         r->gameH = GET(int32_t);
         LOGI("game connected (bridge v%u), window %dx%d", ver, r->gameW, r->gameH);
         makeGameFramebuffer(r);
+        break;
+    }
+    case OP_VIEW_RECT: {
+        for (int i = 0; i < 4; ++i) r->view[i] = GET(int32_t);
+        r->hasView = r->view[2] > 0 && r->view[3] > 0;
         break;
     }
     case OP_ENABLE: { GLenum c = GET(uint32_t); if (!unsupportedCap(c)) glEnable(c); break; }
@@ -518,11 +524,21 @@ static void present(desp_replay* r, int sw, int sh, int outRect[4], float waitin
     glClear(GL_COLOR_BUFFER_BIT);
     int rect[4] = {0, 0, sw, sh};
     if (r->fboTex && r->gameW > 0 && r->gameH > 0) {
-        float s = (float)sw / r->gameW < (float)sh / r->gameH ? (float)sw / r->gameW : (float)sh / r->gameH;
-        rect[2] = (int)(r->gameW * s);
-        rect[3] = (int)(r->gameH * s);
-        rect[0] = (sw - rect[2]) / 2;
-        rect[1] = (sh - rect[3]) / 2;
+        if (r->hasView) {
+            // stretch the game's picture (not its black bars) over the whole screen: place the
+            // whole window so that the picture's part of it covers the screen exactly
+            float sx = (float)sw / r->view[2], sy = (float)sh / r->view[3];
+            rect[0] = (int)(-r->view[0] * sx);
+            rect[1] = (int)(-(r->gameH - r->view[1] - r->view[3]) * sy);
+            rect[2] = (int)(r->gameW * sx + 0.5f);
+            rect[3] = (int)(r->gameH * sy + 0.5f);
+        } else {
+            float s = (float)sw / r->gameW < (float)sh / r->gameH ? (float)sw / r->gameW : (float)sh / r->gameH;
+            rect[2] = (int)(r->gameW * s);
+            rect[3] = (int)(r->gameH * s);
+            rect[0] = (sw - rect[2]) / 2;
+            rect[1] = (sh - rect[3]) / 2;
+        }
         glViewport(rect[0], rect[1], rect[2], rect[3]);
         glUseProgram(r->blitProg);
         glActiveTexture(GL_TEXTURE0);
