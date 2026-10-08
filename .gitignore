@@ -34,3 +34,10 @@ android-box/app/src/main/java/org/libsdl/
 android-box/app/src/main/jniLibs/
 android-box/app/src/main/assets/x86lib/
 android-box/box64-src/
+engine/build-*/
+engine/android/SDL/
+engine/android/.gradle/
+engine/android/app/build/
+engine/android/app/.cxx/
+engine/android/build/
+engine/android/app/src/main/java/org/libsdl/

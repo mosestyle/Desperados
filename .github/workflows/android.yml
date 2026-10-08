@@ -7,6 +7,8 @@ on:
     paths-ignore:
       - 'android-box/**'
       - '.github/workflows/original.yml'
+      - 'engine/**'
+      - '.github/workflows/engine.yml'
   workflow_dispatch:
 
 permissions:

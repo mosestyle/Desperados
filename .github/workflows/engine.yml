@@ -1,0 +1,97 @@
+name: Build engine APK
+
+# The new Desperados engine (engine/): translated from the original game, runs natively.
+# Published as its own release ("engine-test"); the "latest" and "original-test" releases stay.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'engine/**'
+      - 'third_party/**'
+      - '.github/workflows/engine.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  SDL_VERSION: 2.30.9
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Desktop build of the engine (compile check)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libsdl2-dev libgles-dev libegl-dev zlib1g-dev > /dev/null
+          cmake -S engine -B build-desk -DCMAKE_BUILD_TYPE=Release > /dev/null
+          cmake --build build-desk -j"$(nproc)" 2>&1 | tee desk.log | grep -E "error|warning" | head -40 || true
+          test -x build-desk/dvrender
+
+      - name: Get SDL2
+        run: |
+          curl -sSL "https://github.com/libsdl-org/SDL/releases/download/release-${SDL_VERSION}/SDL2-${SDL_VERSION}.tar.gz" | tar xz
+          mv "SDL2-${SDL_VERSION}" engine/android/SDL
+          rm -rf engine/android/SDL/android-project/gradle engine/android/SDL/android-project/gradlew*
+          mkdir -p engine/android/app/src/main/java/org/libsdl
+          cp -r engine/android/SDL/android-project/app/src/main/java/org/libsdl/app engine/android/app/src/main/java/org/libsdl/
+
+      - name: Install Android CMake
+        run: |
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          for i in 1 2 3 4; do
+            if yes | "$SDKM" --install "cmake;3.22.1" > /dev/null; then echo "CMake installed"; break; fi
+            echo "Retry $i"; rm -rf "$ANDROID_HOME/cmake/3.22.1"; sleep 10
+          done
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+          validate-wrappers: false
+
+      - name: Build APK
+        working-directory: engine/android
+        run: |
+          NDK_ARG=""
+          if [ -n "$ANDROID_NDK_LATEST_HOME" ]; then NDK_ARG="-PndkVersion=$(basename "$ANDROID_NDK_LATEST_HOME")"; fi
+          set -o pipefail
+          gradle assembleRelease --no-daemon $NDK_ARG -PversionCode=${{ github.run_number }} 2>&1 | tee ../../build.log
+
+      - name: Report build errors
+        if: failure()
+        run: |
+          [ -f build.log ] || exit 0
+          { grep -E "error:|error :|undefined reference|CMake Error|FAILED" build.log | head -n 40;
+            grep -A 10 "What went wrong" build.log | head -n 30; } > errors.txt || true
+          [ -s errors.txt ] && echo "::error title=build::$(sed 's/%/%25/g' errors.txt | awk '{printf "%s%%0A", $0}')" || true
+
+      - name: Collect APK
+        run: |
+          cp engine/android/app/build/outputs/apk/release/app-release.apk DesperadosEngine.apk
+          unzip -l DesperadosEngine.apk | grep -E "\.so"
+          unzip -l DesperadosEngine.apk | grep -q "lib/arm64-v8a/libmain.so" || { echo "::error::engine library missing"; exit 1; }
+          ls -la DesperadosEngine.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DesperadosEngine-build-${{ github.run_number }}
+          path: DesperadosEngine.apk
+
+      - name: Publish test build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete engine-test --cleanup-tag --yes || true
+          gh release create engine-test DesperadosEngine.apk \
+            --prerelease \
+            --target "$GITHUB_SHA" \
+            --title "Engine test build (#${{ github.run_number }})" \
+            --notes "The new Desperados engine, translated from the original game (no Box64). Installs as its own app ('Desperados Engine'); the other two apps and their releases stay. Needs your game folder in the phone's internal storage as /Desperados (the same folder as the other apps) and 'all files access'. Step 1: the missions are drawn like the original (scenery animates); drag, flick and pinch to look around, arrows at the top switch missions. A log is written to Desperados/engine-log.txt."
