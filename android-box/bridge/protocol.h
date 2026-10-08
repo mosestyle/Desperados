@@ -76,6 +76,9 @@ enum {
     OP_PIXELS = 100,       // pixel data for OP_READ_PIXELS
     OP_INPUT,              // struct desp_input
     OP_WINDOW_SIZE,        // i32 width, i32 height (the game's window, in game pixels)
+    OP_FRAME_DONE,         // (nothing) the app has shown a frame: the game may draw another
+                           // (the game keeps at most 2 frames ahead of the screen, so input
+                           // never waits behind a queue of old frames)
 };
 
 #pragma pack(push, 1)

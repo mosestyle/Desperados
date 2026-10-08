@@ -133,10 +133,13 @@ static int (*pushEvent)(void*);
 
 static void deliverInput(const desp_input* in);
 
+static int framesInFlight;  // finished frames the app hasn't shown yet
+
+// Handles what the app sent. block: wait for at least one message.
 static void pollApp(int block) {
-    for (;;) {
+    for (int first = 1;; first = 0) {
         struct pollfd pf = {sock, POLLIN, 0};
-        if (poll(&pf, 1, block ? -1 : 0) <= 0) return;
+        if (poll(&pf, 1, block && first ? -1 : 0) <= 0) return;
         desp_msg_header h;
         size_t got = 0;
         while (got < sizeof h) {
@@ -151,8 +154,8 @@ static void pollApp(int block) {
             got += (size_t)r;
         }
         if (h.op == OP_INPUT && h.len >= sizeof(desp_input)) deliverInput((const desp_input*)data);
+        else if (h.op == OP_FRAME_DONE && framesInFlight > 0) framesInFlight--;
         free(data);
-        if (h.op == OP_PIXELS) return;  // the caller of glReadPixels takes over (see there)
     }
 }
 
@@ -293,9 +296,12 @@ static int frameNo;
 E void desp_frame_end(void) {
     send0(OP_FRAME_END);
     flushOut();
+    ++framesInFlight;
     if (frameNo < 3) { fprintf(stderr, "[bridge] game frame %d sent\n", frameNo + 1); fflush(stderr); }
     if (frameNo == 1) sendFocus();
     pollApp(0);
+    // don't run ahead of the screen: wait while 2 frames are still waiting to be shown
+    while (framesInFlight >= 2) pollApp(1);
     ++frameNo;
 }
 
@@ -544,6 +550,7 @@ E void glReadPixels(GLint x, GLint y, GLsizei w, GLsizei h, GLenum fmt, GLenum t
             return;
         }
         if (hd.op == OP_INPUT && hd.len >= sizeof(desp_input)) deliverInput((const desp_input*)buf);
+        else if (hd.op == OP_FRAME_DONE && framesInFlight > 0) framesInFlight--;
         free(buf);
     }
 }

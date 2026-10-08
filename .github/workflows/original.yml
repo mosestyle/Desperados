@@ -40,7 +40,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: build-box64/box64
-          key: box64-glibc-a64-${{ env.BOX64_COMMIT }}
+          key: box64-glibc-a64-${{ env.BOX64_COMMIT }}-${{ hashFiles('android-box/child/patch_box64.py') }}
 
       - name: Build Box64
         if: steps.box64-cache.outputs.cache-hit != 'true'
@@ -49,6 +49,7 @@ jobs:
           git init -q && git remote add origin https://github.com/ptitSeb/box64
           git fetch -q --depth 1 origin "$BOX64_COMMIT" && git checkout -q FETCH_HEAD
           cd ..
+          python3 android-box/child/patch_box64.py box64-src
           cmake -S box64-src -B build-box64 -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++ \
             -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64 -DARM_DYNAREC=ON -DBOX32=ON \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo > box64-cmake.log 2>&1 || { tail -40 box64-cmake.log; exit 1; }

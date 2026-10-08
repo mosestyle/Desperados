@@ -558,7 +558,10 @@ static void present(desp_replay* r, int sw, int sh, int outRect[4], float waitin
     if (scissor) glEnable(GL_SCISSOR_TEST);
 }
 
-void desp_replay_present(desp_replay* r, int sw, int sh, int outRect[4]) { present(r, sw, sh, outRect, -1); }
+void desp_replay_present(desp_replay* r, int sw, int sh, int outRect[4]) {
+    present(r, sw, sh, outRect, -1);
+    sendMsg(r, OP_FRAME_DONE, NULL, 0);  // the game may draw the next one
+}
 void desp_replay_present_waiting(desp_replay* r, int sw, int sh, float seconds) { present(r, sw, sh, NULL, seconds); }
 
 int desp_replay_read_frame(desp_replay* r, unsigned char* rgba) {
