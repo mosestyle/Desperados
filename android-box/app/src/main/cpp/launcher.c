@@ -14,7 +14,10 @@
 // Everything the game process prints goes to Desperados/android-log.txt.
 #define _GNU_SOURCE
 #include <SDL.h>
+#include <stdarg.h>
 #include <android/log.h>
+#include <GLES3/gl3.h>
+#include <dirent.h>
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -123,6 +126,8 @@ static const char* kLinks[][2] = {
 // sound: the game process writes PCM (after a 16-byte format header) into a pipe
 
 static SDL_AudioDeviceID audioDev;
+static volatile int leaving;
+static char audioFifo[600];
 static int audioThread(void* arg) {
     const char* fifo = arg;
     int fd = open(fifo, O_RDONLY);
@@ -134,6 +139,7 @@ static int audioThread(void* arg) {
         if (r <= 0) { close(fd); return 0; }
         got += (size_t)r;
     }
+    if (leaving) { close(fd); return 0; }
     if (memcmp(hdr, "DSAU", 4) != 0) { logf_("audio: bad header"); close(fd); return 0; }
     SDL_AudioSpec want;
     SDL_zero(want);
@@ -149,7 +155,7 @@ static int audioThread(void* arg) {
     char buf[8192];
     for (;;) {
         ssize_t r = read(fd, buf, sizeof buf);
-        if (r <= 0) break;
+        if (r <= 0 || leaving) break;
         if (SDL_GetQueuedAudioSize(audioDev) > bytesPerSec / 4) continue;  // keep the delay short
         SDL_QueueAudio(audioDev, buf, (Uint32)r);
     }
@@ -178,6 +184,13 @@ static pid_t startGame(const char* game, const char* gameExe, const char* libDir
     // prints the CPU info)
     snprintf(e[n++], 700, "BOX64_RCFILE=%s", rcFile);
     snprintf(e[n++], 700, "BOX64_NOBANNER=0");
+    // the translated-code cache maps files as executable, which Android refuses ("Error allocating
+    // Dynarec memory: Permission denied")
+    snprintf(e[n++], 700, "BOX64_DYNACACHE=0");
+    // Box32 otherwise switches the process to a 32-bit address limit and restarts itself, which
+    // can't work here (its own program file has no loader of its own on Android) and would leave
+    // the process with that limit set
+    snprintf(e[n++], 700, "BOX64_NOPERSONA32BITS=1");
     snprintf(e[n++], 700, "DESP_BRIDGE_FD=%d", sock);
     snprintf(e[n++], 700, "DESP_GAME_EXE=%s", exe);
     snprintf(e[n++], 700, "SDL_VIDEODRIVER=offscreen");
@@ -253,14 +266,86 @@ static void sendKey(desp_replay* r, int down, int scancode, int keycode) {
     desp_replay_send_input(r, &in);
 }
 
+// What the game process's threads are doing (for the log while we wait for its first picture):
+// name, state (R running, S sleeping, D disk), CPU time used, and what a sleeping thread waits in.
+static void logGameThreads(pid_t pid) {
+    char dir[64];
+    snprintf(dir, sizeof dir, "/proc/%d/task", (int)pid);
+    DIR* d = opendir(dir);
+    if (!d) { logf_("game process: %s", strerror(errno)); return; }
+    struct dirent* e;
+    int shown = 0;
+    while ((e = readdir(d)) && shown < 24) {
+        if (e->d_name[0] < '0' || e->d_name[0] > '9') continue;
+        char p[128], buf[512], wchan[64] = "";
+        snprintf(p, sizeof p, "%s/%s/stat", dir, e->d_name);
+        FILE* f = fopen(p, "r");
+        if (!f) continue;
+        size_t n = fread(buf, 1, sizeof buf - 1, f);
+        fclose(f);
+        buf[n] = 0;
+        char* open = strchr(buf, '('), * close = strrchr(buf, ')');
+        if (!open || !close) continue;
+        *close = 0;
+        char state = close[2];
+        unsigned long ut = 0, st = 0;
+        // fields after the name: state ppid pgrp session tty tpgid flags minflt cminflt majflt cmajflt utime stime
+        sscanf(close + 2, "%*c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %lu %lu", &ut, &st);
+        snprintf(p, sizeof p, "%s/%s/wchan", dir, e->d_name);
+        f = fopen(p, "r");
+        if (f) { size_t k = fread(wchan, 1, sizeof wchan - 1, f); wchan[k] = 0; fclose(f); }
+        logf_("  thread %s '%s': %c, cpu %.1f s%s%s", e->d_name, open + 1, state, (ut + st) / 100.0,
+              wchan[0] && strcmp(wchan, "0") ? ", waiting in " : "", wchan[0] && strcmp(wchan, "0") ? wchan : "");
+        ++shown;
+    }
+    closedir(d);
+}
+
+static void bridgeLog(const char* line) {
+    LOG("%s", line);
+    if (logFile) { fprintf(logFile, "[bridge] %s\n", line); fflush(logFile); }
+}
+
+// Everything SDL_main set up, so that every way out cleans up. Android keeps the app's process
+// alive after SDL_main returns and runs SDL_main again in it on the next start, so nothing may
+// be left behind (a window left open made the next start fail with "Android only supports one
+// window").
+static SDL_Window* win;
+static SDL_GLContext ctx;
+static pid_t gamePid = -1;
+static desp_replay* replay;
+
+static int leave(int code) {
+    leaving = 1;
+    if (gamePid > 0) {
+        kill(gamePid, SIGKILL);
+        waitpid(gamePid, NULL, 0);
+        gamePid = -1;
+    }
+    if (audioFifo[0]) {  // wake the sound thread if it's still waiting for the game to open the pipe
+        int fd = open(audioFifo, O_WRONLY | O_NONBLOCK);
+        if (fd >= 0) close(fd);
+    }
+    if (audioDev) { SDL_CloseAudioDevice(audioDev); audioDev = 0; }
+    if (replay) { desp_replay_destroy(replay); replay = NULL; }
+    desp_replay_set_logger(NULL);
+    if (ctx) { SDL_GL_DeleteContext(ctx); ctx = NULL; }
+    if (win) { SDL_DestroyWindow(win); win = NULL; }
+    if (logFile) { fclose(logFile); logFile = NULL; }
+    SDL_Quit();
+    return code;
+}
+
 int SDL_main(int argc, char* argv[]) {
     (void)argc; (void)argv;
+    leaving = 0;
+    audioFifo[0] = 0;
     signal(SIGPIPE, SIG_IGN);
     SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
     SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_EVENTS) != 0) return 1;
 
-    // the game folder
+    // the game folder (the start screen has made sure the app may read it)
     static const char* candidates[] = {"/storage/emulated/0/Desperados", "/sdcard/Desperados", NULL};
     const char* game = NULL;
     char path[1024];
@@ -272,29 +357,45 @@ int SDL_main(int argc, char* argv[]) {
         say("Desperados",
             "Couldn't find the game.\n\nCopy the Linux version of Desperados (the folder with "
             "'desperados32', 'data', 'bootmenu' and 'shaders') to the phone's internal storage "
-            "as a folder named 'Desperados', allow this app to access all files, then start it again.");
-        return 0;
+            "as a folder named 'Desperados', then start the app again.");
+        return leave(0);
     }
     snprintf(path, sizeof path, "%s/android-log.txt", game);
     logFile = fopen(path, "w");
     int logFd = logFile ? fileno(logFile) : -1;
     logf_("Desperados Original: game folder %s", game);
+    desp_replay_set_logger(bridgeLog);
+    {
+        FILE* test = fopen(path, "r");  // can we read the folder at all?
+        if (!test) {
+            say("Desperados", "The app can't read the Desperados folder. Allow 'all files access' for "
+                              "Desperados Original in the phone's settings, then start it again.");
+            return leave(0);
+        }
+        fclose(test);
+    }
 
     // window and GLES 3 context
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
-    SDL_Window* win = SDL_CreateWindow("Desperados", 0, 0, 0, 0, SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN);
-    if (!win) { say("Desperados", SDL_GetError()); return 1; }
-    SDL_GLContext ctx = SDL_GL_CreateContext(win);
-    if (!ctx) { say("Desperados", SDL_GetError()); return 1; }
+    win = SDL_CreateWindow("Desperados", 0, 0, 0, 0, SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN);
+    if (!win) { say("Desperados", SDL_GetError()); return leave(1); }
+    ctx = SDL_GL_CreateContext(win);
+    if (!ctx) { say("Desperados", SDL_GetError()); return leave(1); }
     SDL_GL_SetSwapInterval(1);
+    logf_("GPU: %s, %s", (const char*)glGetString(GL_RENDERER), (const char*)glGetString(GL_VERSION));
     int sw, sh;
     SDL_GL_GetDrawableSize(win, &sw, &sh);
     // the game draws at the phone's aspect ratio, 768 pixels high
     int gh = 768, gw = sw > 0 && sh > 0 ? (int)((long)768 * sw / sh) & ~1 : 1024;
     if (gw < 1024) { gw = 1024; gh = sh > 0 ? (int)((long)1024 * sh / sw) & ~1 : 768; }
     logf_("screen %dx%d, game window %dx%d", sw, sh, gw, gh);
+    // something on the screen straight away
+    glViewport(0, 0, sw, sh);
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    SDL_GL_SwapWindow(win);
 
     // runtime files
     char libDir[512], files[512], linkDir[600], x86Dir[600], fifo[600], userDir[600], rcFile[600];
@@ -304,6 +405,7 @@ int SDL_main(int argc, char* argv[]) {
     snprintf(x86Dir, sizeof x86Dir, "%s/x86lib", files);
     snprintf(fifo, sizeof fifo, "%s/audio.pipe", files);
     snprintf(userDir, sizeof userDir, "%s/userdata", game);
+    mkdir(files, 0755);
     mkdir(linkDir, 0755);
     mkdir(x86Dir, 0755);
     mkdir(userDir, 0755);
@@ -327,7 +429,10 @@ int SDL_main(int argc, char* argv[]) {
     char gameExe[700], srcExe[700];
     snprintf(srcExe, sizeof srcExe, "%s/desperados32", game);
     snprintf(gameExe, sizeof gameExe, "%s/desperados32", files);
-    if (!copyFile(srcExe, gameExe, 0755)) { say("Desperados", "Couldn't copy desperados32 into the app."); return 1; }
+    if (!copyFile(srcExe, gameExe, 0755)) {
+        say("Desperados", "Couldn't copy desperados32 into the app. The details are in Desperados/android-log.txt.");
+        return leave(1);
+    }
     snprintf(rcFile, sizeof rcFile, "%s/box64.box64rc", files);
     {
         FILE* f = fopen(rcFile, "w");
@@ -338,44 +443,50 @@ int SDL_main(int argc, char* argv[]) {
     }
     unlink(fifo);
     if (mkfifo(fifo, 0600) != 0) { logf_("no sound: can't make the audio pipe (%s)", strerror(errno)); fifo[0] = 0; }
+    snprintf(audioFifo, sizeof audioFifo, "%s", fifo);
 
     int sv[2];
-    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) { say("Desperados", "socketpair failed"); return 1; }
+    if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sv) != 0) { say("Desperados", "socketpair failed"); return leave(1); }
+    // the game's end must survive exec: clear close-on-exec on it only
+    fcntl(sv[1], F_SETFD, 0);
     logf_("starting the game process (libraries in %s)", libDir);
-    pid_t pid = startGame(game, gameExe, libDir, linkDir, x86Dir, fifo, userDir, rcFile, files, sv[1], logFd, gw, gh);
+    gamePid = startGame(game, gameExe, libDir, linkDir, x86Dir, fifo, userDir, rcFile, files, sv[1], logFd, gw, gh);
     close(sv[1]);
-    if (pid < 0) { say("Desperados", "Couldn't start the game process."); return 1; }
-    if (fifo[0]) SDL_CreateThread(audioThread, "audio", fifo);
+    if (gamePid < 0) { say("Desperados", "Couldn't start the game process."); return leave(1); }
+    if (fifo[0]) {
+        SDL_Thread* th = SDL_CreateThread(audioThread, "audio", audioFifo);
+        if (th) SDL_DetachThread(th);
+    }
 
-    desp_replay* r = desp_replay_create(sv[0]);
+    replay = desp_replay_create(sv[0]);
     int rect[4] = {0, 0, sw, sh};
     touch_t t = {0};
     int frames = 0, running = 1;
-    Uint32 lastFrame = SDL_GetTicks();
+    Uint32 started = SDL_GetTicks(), lastNote = started;
     while (running) {
         SDL_Event ev;
         while (SDL_PollEvent(&ev)) {
             switch (ev.type) {
             case SDL_QUIT: running = 0; break;
             case SDL_KEYDOWN: case SDL_KEYUP:
-                if (ev.key.keysym.sym == SDLK_AC_BACK) sendKey(r, ev.type == SDL_KEYDOWN, SDL_SCANCODE_ESCAPE, SDLK_ESCAPE);
-                else sendKey(r, ev.type == SDL_KEYDOWN, ev.key.keysym.scancode, ev.key.keysym.sym);
+                if (ev.key.keysym.sym == SDLK_AC_BACK) sendKey(replay, ev.type == SDL_KEYDOWN, SDL_SCANCODE_ESCAPE, SDLK_ESCAPE);
+                else sendKey(replay, ev.type == SDL_KEYDOWN, ev.key.keysym.scancode, ev.key.keysym.sym);
                 break;
             case SDL_WINDOWEVENT:
                 if (ev.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) SDL_GL_GetDrawableSize(win, &sw, &sh);
                 break;
             case SDL_FINGERDOWN:
-                if (t.active) break;  // one finger at a time for now
+                if (t.active || !frames) break;  // one finger at a time for now
                 t.active = 1;
                 t.id = ev.tfinger.fingerId;
                 t.dragged = t.longFired = 0;
                 t.sx = ev.tfinger.x * sw;
                 t.sy = ev.tfinger.y * sh;
-                t.downAt = ev.tfinger.timestamp;
+                t.downAt = SDL_GetTicks();
                 {
                     int gx, gy;
-                    toGame(r, rect, sh, t.sx, t.sy, &gx, &gy);
-                    sendMouse(r, IN_MOUSE_TO, gx, gy, 0);
+                    toGame(replay, rect, sh, t.sx, t.sy, &gx, &gy);
+                    sendMouse(replay, IN_MOUSE_TO, gx, gy, 0);
                 }
                 break;
             case SDL_FINGERMOTION:
@@ -386,8 +497,8 @@ int SDL_main(int argc, char* argv[]) {
                     if (dx * dx + dy * dy > slop * slop) t.dragged = 1;
                     if (t.dragged) {
                         int gx, gy;
-                        toGame(r, rect, sh, x, y, &gx, &gy);
-                        sendMouse(r, IN_MOUSE_TO, gx, gy, 0);
+                        toGame(replay, rect, sh, x, y, &gx, &gy);
+                        sendMouse(replay, IN_MOUSE_TO, gx, gy, 0);
                     }
                 }
                 break;
@@ -396,10 +507,10 @@ int SDL_main(int argc, char* argv[]) {
                 t.active = 0;
                 if (!t.dragged && !t.longFired) {
                     int gx, gy;
-                    toGame(r, rect, sh, t.sx, t.sy, &gx, &gy);
-                    sendMouse(r, IN_MOUSE_TO, gx, gy, 0);
-                    sendMouse(r, IN_MOUSE_DOWN, gx, gy, SDL_BUTTON_LEFT);
-                    sendMouse(r, IN_MOUSE_UP, gx, gy, SDL_BUTTON_LEFT);
+                    toGame(replay, rect, sh, t.sx, t.sy, &gx, &gy);
+                    sendMouse(replay, IN_MOUSE_TO, gx, gy, 0);
+                    sendMouse(replay, IN_MOUSE_DOWN, gx, gy, SDL_BUTTON_LEFT);
+                    sendMouse(replay, IN_MOUSE_UP, gx, gy, SDL_BUTTON_LEFT);
                 }
                 break;
             default: break;
@@ -408,40 +519,55 @@ int SDL_main(int argc, char* argv[]) {
         // long press: right click
         if (t.active && !t.dragged && !t.longFired && SDL_GetTicks() - t.downAt > 500) {
             int gx, gy;
-            toGame(r, rect, sh, t.sx, t.sy, &gx, &gy);
-            sendMouse(r, IN_MOUSE_TO, gx, gy, 0);
-            sendMouse(r, IN_MOUSE_DOWN, gx, gy, SDL_BUTTON_RIGHT);
-            sendMouse(r, IN_MOUSE_UP, gx, gy, SDL_BUTTON_RIGHT);
+            toGame(replay, rect, sh, t.sx, t.sy, &gx, &gy);
+            sendMouse(replay, IN_MOUSE_TO, gx, gy, 0);
+            sendMouse(replay, IN_MOUSE_DOWN, gx, gy, SDL_BUTTON_RIGHT);
+            sendMouse(replay, IN_MOUSE_UP, gx, gy, SDL_BUTTON_RIGHT);
             t.longFired = 1;
         }
 
-        int got = desp_replay_frame(r, 8);
+        int got = desp_replay_frame(replay, frames ? 8 : 16);
         if (got == 0) {
             int status = 0;
-            for (int i = 0; i < 20 && waitpid(pid, &status, WNOHANG) == 0; ++i) SDL_Delay(50);
-            if (WIFSIGNALED(status))
-                logf_("the game process was stopped by signal %d (%s) after %d frames", WTERMSIG(status),
-                      WTERMSIG(status) == SIGSYS ? "a system call Android doesn't allow" : strsignal(WTERMSIG(status)), frames);
-            else
-                logf_("the game process ended (exit code %d, status %#x) after %d frames", WEXITSTATUS(status), status, frames);
+            pid_t w = 0;
+            for (int i = 0; i < 40 && (w = waitpid(gamePid, &status, WNOHANG)) == 0; ++i) SDL_Delay(50);
+            if (w == gamePid) {
+                gamePid = -1;
+                if (WIFSIGNALED(status))
+                    logf_("the game process was stopped by signal %d (%s) after %d frames", WTERMSIG(status),
+                          WTERMSIG(status) == SIGSYS ? "a system call Android doesn't allow" : strsignal(WTERMSIG(status)), frames);
+                else
+                    logf_("the game process ended (exit code %d) after %d frames", WEXITSTATUS(status), frames);
+            } else {
+                logf_("the game process closed its connection after %d frames", frames);
+            }
             say("Desperados", frames ? "The game has ended." :
                 "The game couldn't start. The details are in Desperados/android-log.txt.");
             break;
         }
+        Uint32 now = SDL_GetTicks();
         if (got > 0) {
             ++frames;
-            lastFrame = SDL_GetTicks();
-            desp_replay_present(r, sw, sh, rect);
+            desp_replay_present(replay, sw, sh, rect);
             SDL_GL_SwapWindow(win);
-            if (frames == 1) logf_("first frame from the game");
-        } else if (frames == 0 && SDL_GetTicks() - lastFrame > 120000) {
-            say("Desperados", "The game hasn't shown anything for 2 minutes. The details are in Desperados/android-log.txt.");
-            break;
+            if (frames == 1) logf_("first picture from the game after %.1f s", (now - started) / 1000.0);
+        } else if (frames == 0) {
+            // still loading: keep the screen alive with a moving bar, note progress in the log
+            desp_replay_present_waiting(replay, sw, sh, (now - started) / 1000.0f);
+            SDL_GL_SwapWindow(win);
+            if (now - lastNote >= 15000) {
+                lastNote = now;
+                unsigned long long bytes = 0, msgs = 0;
+                desp_replay_stats(replay, &bytes, &msgs);
+                logf_("still waiting for the game's first picture (%u s; %llu commands, %.1f MB from the game so far)",
+                      (now - started) / 1000, msgs, bytes / 1048576.0);
+                logGameThreads(gamePid);
+            }
+            if (now - started > 300000) {
+                say("Desperados", "The game hasn't shown anything for 5 minutes. The details are in Desperados/android-log.txt.");
+                break;
+            }
         }
     }
-    kill(pid, SIGTERM);
-    if (audioDev) SDL_CloseAudioDevice(audioDev);
-    desp_replay_destroy(r);
-    if (logFile) fclose(logFile);
-    exit(0);
+    return leave(0);
 }

@@ -17,6 +17,16 @@ int desp_replay_frame(desp_replay* r, int timeoutMs);
 // with black bars; writes where it landed (screen pixels) to *outRect when not NULL.
 void desp_replay_present(desp_replay* r, int screenW, int screenH, int outRect[4]);
 
+// While waiting for the game's first picture: the same, plus a moving bar near the bottom of
+// the screen so it's clear the app is working. `seconds`: time since the game was started.
+void desp_replay_present_waiting(desp_replay* r, int screenW, int screenH, float seconds);
+
+// Where the bridge's messages go (shader errors and such); default: logcat / stderr.
+void desp_replay_set_logger(void (*fn)(const char* line));
+
+// How much has come from the game so far (bytes, commands).
+void desp_replay_stats(desp_replay* r, unsigned long long* bytes, unsigned long long* commands);
+
 // Size of the game's window (0 before the game has created it).
 void desp_replay_game_size(desp_replay* r, int* w, int* h);
 

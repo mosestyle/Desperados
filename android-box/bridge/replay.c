@@ -9,12 +9,27 @@
 #include <string.h>
 #include <unistd.h>
 
+#include <stdarg.h>
 #ifdef __ANDROID__
 #include <android/log.h>
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "DesperadosBridge", __VA_ARGS__)
-#else
-#define LOGI(...) (fprintf(stderr, "[replay] " __VA_ARGS__), fputc('\n', stderr))
 #endif
+
+static void (*logger)(const char*);
+void desp_replay_set_logger(void (*fn)(const char* line)) { logger = fn; }
+
+__attribute__((format(printf, 1, 2))) static void LOGI(const char* fmt, ...) {
+    char line[2304];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(line, sizeof line, fmt, ap);
+    va_end(ap);
+    if (logger) { logger(line); return; }
+#ifdef __ANDROID__
+    __android_log_print(ANDROID_LOG_INFO, "DesperadosBridge", "%s", line);
+#else
+    fprintf(stderr, "[replay] %s\n", line);
+#endif
+}
 
 typedef struct { GLuint prog; char name[64]; GLint real; int resolved; } uloc_t;
 
@@ -34,6 +49,7 @@ struct desp_replay {
     // present
     GLuint blitProg, blitVao, blitVbo;
     int haveFrame;
+    unsigned long long bytes, commands;
 };
 
 static GLuint* nameSlot(desp_replay* r, uint32_t n) {
@@ -60,6 +76,11 @@ void desp_replay_destroy(desp_replay* r) {
     free(r->names);
     free(r->ulocs);
     free(r);
+}
+
+void desp_replay_stats(desp_replay* r, unsigned long long* bytes, unsigned long long* commands) {
+    *bytes = r->bytes;
+    *commands = r->commands;
 }
 
 void desp_replay_game_size(desp_replay* r, int* w, int* h) { *w = r->gameW; *h = r->gameH; }
@@ -436,6 +457,8 @@ int desp_replay_frame(desp_replay* r, int timeoutMs) {
             r->buf = realloc(r->buf, r->cap);
         }
         if (h.len && !readAll(r->fd, r->buf, h.len)) { LOGI("game connection lost in op %u", h.op); return 0; }
+        r->bytes += sizeof h + h.len;
+        r->commands++;
         if (h.op == OP_FRAME_END) { r->haveFrame = 1; return 1; }
         execute(r, h.op, r->buf, h.len);
     }
@@ -451,7 +474,7 @@ static GLuint compile(GLenum type, const char* src) {
     return s;
 }
 
-void desp_replay_present(desp_replay* r, int sw, int sh, int outRect[4]) {
+static void present(desp_replay* r, int sw, int sh, int outRect[4], float waiting) {
     if (!r->blitProg) {
         GLuint vs = compile(GL_VERTEX_SHADER,
             "#version 300 es\nin vec2 pos; out vec2 uv; void main(){ uv = pos * 0.5 + 0.5; gl_Position = vec4(pos, 0.0, 1.0); }");
@@ -472,10 +495,14 @@ void desp_replay_present(desp_replay* r, int sw, int sh, int outRect[4]) {
         glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, 0);
     }
     // the game's state, restored afterwards
-    GLint vp[4], tex = 0, unit = 0, vao = 0, abuf = 0;
+    GLint vp[4], sb[4], tex = 0, unit = 0, vao = 0, abuf = 0, fb = 0;
     GLfloat cc[4];
+    GLboolean cm[4];
     GLboolean blend = glIsEnabled(GL_BLEND), scissor = glIsEnabled(GL_SCISSOR_TEST);
     glGetIntegerv(GL_VIEWPORT, vp);
+    glGetIntegerv(GL_SCISSOR_BOX, sb);
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &fb);
+    glGetBooleanv(GL_COLOR_WRITEMASK, cm);
     glGetIntegerv(GL_ACTIVE_TEXTURE, &unit);
     glGetFloatv(GL_COLOR_CLEAR_VALUE, cc);
     glActiveTexture(GL_TEXTURE0);
@@ -485,6 +512,7 @@ void desp_replay_present(desp_replay* r, int sw, int sh, int outRect[4]) {
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glDisable(GL_BLEND);
     glDisable(GL_SCISSOR_TEST);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     glViewport(0, 0, sw, sh);
     glClearColor(0, 0, 0, 1);
     glClear(GL_COLOR_BUFFER_BIT);
@@ -503,18 +531,35 @@ void desp_replay_present(desp_replay* r, int sw, int sh, int outRect[4]) {
         glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
         glBindVertexArray(0);
     }
+    if (waiting >= 0) {
+        // a short bar sliding back and forth along the bottom of the screen
+        int barW = sw / 6, barH = sh / 90 > 4 ? sh / 90 : 4, travel = sw / 2 - barW;
+        float ph = waiting * 0.6f;
+        ph -= (float)(int)ph;
+        float k = ph < 0.5f ? ph * 2 : 2 - ph * 2;
+        glEnable(GL_SCISSOR_TEST);
+        glScissor(sw / 4 + (int)(k * travel), sh / 12, barW, barH);
+        glClearColor(0.85f, 0.62f, 0.25f, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glDisable(GL_SCISSOR_TEST);
+    }
     if (outRect) memcpy(outRect, rect, sizeof rect);
     glUseProgram(r->curProgram);
-    glBindFramebuffer(GL_FRAMEBUFFER, r->fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)fb == 0 ? r->fbo : (GLuint)fb);
     glBindTexture(GL_TEXTURE_2D, (GLuint)tex);
     glActiveTexture((GLenum)unit);
     glBindVertexArray((GLuint)vao);
     glBindBuffer(GL_ARRAY_BUFFER, (GLuint)abuf);
     glViewport(vp[0], vp[1], vp[2], vp[3]);
+    glScissor(sb[0], sb[1], sb[2], sb[3]);
+    glColorMask(cm[0], cm[1], cm[2], cm[3]);
     glClearColor(cc[0], cc[1], cc[2], cc[3]);
     if (blend) glEnable(GL_BLEND);
     if (scissor) glEnable(GL_SCISSOR_TEST);
 }
+
+void desp_replay_present(desp_replay* r, int sw, int sh, int outRect[4]) { present(r, sw, sh, outRect, -1); }
+void desp_replay_present_waiting(desp_replay* r, int sw, int sh, float seconds) { present(r, sw, sh, NULL, seconds); }
 
 int desp_replay_read_frame(desp_replay* r, unsigned char* rgba) {
     if (!r->fbo || !r->haveFrame) return 0;

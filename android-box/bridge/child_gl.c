@@ -273,6 +273,7 @@ static int frameNo;
 E void desp_frame_end(void) {
     send0(OP_FRAME_END);
     flushOut();
+    if (frameNo < 3) { fprintf(stderr, "[bridge] game frame %d sent\n", frameNo + 1); fflush(stderr); }
     if (frameNo == 1) sendFocus();
     pollApp(0);
     ++frameNo;
@@ -632,7 +633,9 @@ E EGLSurface eglCreateWindowSurface(EGLDisplay d, EGLConfig c, void* w, const EG
 E EGLBoolean eglDestroySurface(EGLDisplay d, EGLSurface s) { (void)d; (void)s; return 1; }
 E EGLBoolean eglMakeCurrent(EGLDisplay d, EGLSurface r, EGLSurface w, EGLContext c) {
     (void)d; (void)r; (void)w;
-    if (c && !eCurrent) {  // first context: tell the app who we are and how big we draw
+    static int helloSent;
+    if (c && !helloSent) {  // first context: tell the app who we are and how big we draw
+        helloSent = 1;
         uint8_t* p = msg(OP_HELLO, 12);
         uint32_t v = DESP_BRIDGE_VERSION;
         PUT(p, v); PUT(p, winW); PUT(p, winH);
