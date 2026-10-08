@@ -1,9 +1,12 @@
-// The app: window, GL context, the player's game folder, then a mission drawn by the engine.
-// Step 1: look at the missions (drag / flick / pinch), animated scenery; arrows at the top switch
+// The app: window, GL context, the player's game folder, then a mission run by the engine.
+// Drag / flick / pinch move the view. Tap a hero to select him, tap the ground to walk there,
+// tap twice to run (the original's click / double click). The buttons on the left select the
+// heroes, the one on the right makes the hero lie down / stand up. Arrows at the top switch
 // between the missions.
 #include <SDL.h>
 
 #include <GLES3/gl3.h>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <memory>
@@ -12,7 +15,9 @@
 
 #include "app/Camera.h"
 #include "app/Overlay.h"
+#include "dv/DVElement.h"
 #include "dv/DVEngine.h"
+#include "dv/DVSprite.h"
 #include "sb/SBDrawManager.h"
 #include "sb/SBFile.h"
 
@@ -37,7 +42,42 @@ static std::string findGameFolder(int argc, char** argv) {
 struct Touch {
     SDL_FingerID id;
     float x, y;
+    float x0, y0;   // where it went down
+    Uint32 t0;      // when
 };
+
+// the app's own buttons (until the game's interface comes)
+struct UIButton {
+    float x, y, w, h;
+    int action;     // 1..6 select hero, 100 lie down / stand up
+    std::string label;
+    bool on;
+};
+
+static std::vector<UIButton> layoutButtons(DVEngine* engine, int sw, int sh) {
+    std::vector<UIButton> b;
+    if (!engine) return b;
+    float bh = sh * 0.085f, bw = sh * 0.24f, gap = sh * 0.015f;
+    float y = sh * 0.16f;
+    const auto& heroes = engine->Heroes();
+    for (size_t i = 0; i < heroes.size(); ++i) {
+        std::string name = heroes[i]->KindName();
+        for (char& c : name) c = (char)toupper((unsigned char)c);
+        b.push_back({gap, y, bw, bh, (int)i + 1, name, heroes[i] == engine->Selected()});
+        y += bh + gap;
+    }
+    if (engine->Selected()) {
+        bool lying = engine->Selected()->Posture() == POSTURE_LYING;
+        b.push_back({sw - bw - gap, sh * 0.5f - bh * 0.5f, bw, bh, 100, lying ? "STAND UP" : "GET DOWN", lying});
+    }
+    return b;
+}
+
+static const UIButton* hitButton(const std::vector<UIButton>& bs, float x, float y) {
+    for (const UIButton& b : bs)
+        if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) return &b;
+    return nullptr;
+}
 
 int main(int argc, char** argv) {
     SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
@@ -136,6 +176,51 @@ int main(int argc, char** argv) {
     if (!levels.empty()) loadLevel(0);
 
     std::vector<Touch> touches;
+    bool tapPossible = false;
+    Uint32 lastHeroTap = 0, lastGroundTap = 0;
+    float lastTapX = 0, lastTapY = 0;
+    // a tap on the map: a hero selects him; the ground orders the selected hero there; a second tap
+    // at the same place soon after makes him run (DVEngine::ManageInputProcessLeftDoubleClick)
+    auto onTap = [&](const SBGeoPoint2D& mp, float sx, float sy) {
+        float slack = 6.0f;
+        if (DVElementActor* h = engine->HeroAt(mp, slack)) {
+            if (h != engine->Selected()) {
+                engine->Select(h);
+                return;
+            }
+        }
+        Uint32 now = SDL_GetTicks();
+        bool twice = now - lastGroundTap < 400 && std::hypot(sx - lastTapX, sy - lastTapY) < sh * 0.06f;
+        if (twice && engine->Selected() && engine->Selected()->IsInMotion()) {
+            engine->OrderMakeRunning();
+            lastGroundTap = 0;
+            return;
+        }
+        engine->OrderMove(mp, twice);
+        lastGroundTap = now;
+        lastTapX = sx;
+        lastTapY = sy;
+    };
+    // the app's buttons: true if (x, y) was on one
+    auto pressButton = [&](float x, float y) -> bool {
+        std::vector<UIButton> bs = layoutButtons(engine.get(), sw, sh);
+        const UIButton* b = hitButton(bs, x, y);
+        if (!b) return false;
+        if (b->action >= 1 && b->action <= 6) {
+            DVElementActor* h = engine->Heroes()[(size_t)b->action - 1];
+            if (h == engine->Selected() && SDL_GetTicks() - lastHeroTap < 400) {
+                // twice: look at him
+                cam.x = h->sprite->pos.posMap.x - cam.ViewW(sw, sh) * 0.5f;
+                cam.y = h->sprite->pos.posMap.y - cam.viewH * 0.5f;
+                cam.Stop();
+            }
+            engine->Select(h);
+            lastHeroTap = SDL_GetTicks();
+        } else if (b->action == 100) {
+            engine->OrderCrouch();
+        }
+        return true;
+    };
     float pinchDist = 0, lastCx = 0, lastCy = 0;
     Uint32 lastMoveT = 0;
     float speedX = 0, speedY = 0;
@@ -163,7 +248,10 @@ int main(int argc, char** argv) {
                     else loadLevel((levelIndex + levels.size() - 1) % levels.size());
                     break;
                 }
-                touches.push_back({ev.tfinger.fingerId, x, y});
+                if (touches.empty() && engine && pressButton(x, y)) break;
+                touches.push_back({ev.tfinger.fingerId, x, y, x, y, SDL_GetTicks()});
+                if (touches.size() > 1) tapPossible = false;
+                else tapPossible = true;
                 cam.dragging = true;
                 cam.Stop();
                 speedX = speedY = 0;
@@ -207,6 +295,20 @@ int main(int argc, char** argv) {
             }
             case SDL_FINGERUP: {
                 bool single = touches.size() == 1;
+                if (single && tapPossible && engine && touches[0].id == ev.tfinger.fingerId) {
+                    const Touch& t = touches[0];
+                    float moved = std::hypot(t.x - t.x0, t.y - t.y0);
+                    Uint32 held = SDL_GetTicks() - t.t0;
+                    if (moved < sh * 0.03f && held < 450) {
+                        // a tap: undo the little drag it made, then act at that point of the map
+                        cam.DragBy(-(t.x - t.x0), -(t.y - t.y0), sh);
+                        float s = cam.ScreenScale(sh);
+                        SBGeoPoint2D mp(cam.x + t.x0 / s, cam.y + t.y0 / s);
+                        onTap(mp, t.x0, t.y0);
+                        speedX = speedY = 0;
+                        lastMoveT = 0;
+                    }
+                }
                 for (size_t i = 0; i < touches.size(); ++i)
                     if (touches[i].id == ev.tfinger.fingerId) {
                         touches.erase(touches.begin() + i);
@@ -227,6 +329,13 @@ int main(int argc, char** argv) {
                     if (button != 0 && !levels.empty()) {
                         if (button > 0) loadLevel((levelIndex + 1) % levels.size());
                         else loadLevel((levelIndex + levels.size() - 1) % levels.size());
+                    } else if (engine && pressButton((float)ev.button.x, (float)ev.button.y)) {
+                    } else if (engine && ev.button.button == SDL_BUTTON_RIGHT) {
+                        engine->OrderStop();
+                    } else if (engine && ev.button.button == SDL_BUTTON_LEFT && (SDL_GetModState() & KMOD_SHIFT)) {
+                        float s = cam.ScreenScale(sh);
+                        onTap(SBGeoPoint2D(cam.x + ev.button.x / s, cam.y + ev.button.y / s), (float)ev.button.x,
+                              (float)ev.button.y);
                     } else {
                         cam.dragging = true;
                         cam.Stop();
@@ -294,6 +403,10 @@ int main(int argc, char** argv) {
                             draw.ScreenWidth() * s, draw.ScreenHeight() * s);
         }
         overlay.LevelBar(levelIndex + 1, levels.size(), sw, sh);
+        for (const UIButton& b : layoutButtons(engine.get(), sw, sh)) {
+            overlay.Rect(b.x, b.y, b.w, b.h, b.on ? 0.25f : 0.0f, b.on ? 0.35f : 0.0f, 0.0f, 0.55f);
+            overlay.Text(b.label.c_str(), b.x + b.w * 0.5f, b.y + b.h * 0.5f, b.h * 0.32f, true);
+        }
         if (!loadError.empty()) overlay.Text(loadError.c_str(), sw * 0.5f, sh * 0.5f, sh * 0.04f, true);
         SDL_GL_SwapWindow(window);
     }

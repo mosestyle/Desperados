@@ -6,6 +6,7 @@
 #include "dv/DVElement.h"
 #include "dv/DVFastFindGrid.h"
 #include "dv/DVFrameHolder.h"
+#include "dv/DVPathFinder.h"
 #include "dv/DVSector.h"
 #include "sb/SBDrawManager.h"
 #include "sb/SBFile.h"
@@ -19,6 +20,8 @@ DVEngine::DVEngine(SBDrawManager* d) : draw(d) {
     mpEngine = this;
     frames.reset(new DVFrameHolder());
     grid.reset(new DVFastFindGrid());
+    pathFinder.reset(new DVPathFinder());
+    pathFinder->SetObstacles(grid.get());
     DVSector::ResetCounters();
 }
 
@@ -62,13 +65,16 @@ bool DVEngine::LoadStateFromFile(const std::string& name) {
         switch (tag) {
         case 0x4d495343: done = LoadMiscFromFile(f); break;                 // MISC
         case 0x42474e44: done = LoadBackgroundFromFile(f); break;           // BGND
-        case 0x4d4f5645: done = grid->LoadMotionObstaclesFromFile(f); break;  // MOVE (+ the path graph)
+        case 0x4d4f5645:  // MOVE: the walkable areas, then the path finder's graph
+            done = grid->LoadMotionObstaclesFromFile(f);
+            done += pathFinder->LoadGraphFromFile(f);
+            break;
         case 0x53474854: done = grid->LoadSightObstaclesFromFile(f); break;   // SGHT
         case 0x4d41534b: done = grid->LoadMaskFromFile(f); break;            // MASK
         case 0x454c454d: done = LoadElemFromFile(f); break;                 // ELEM
         default: break;  // the others come with the next steps
         }
-        if (tag != 0x4d4f5645 && done >= 0 && (uint32_t)done != len)
+        if (done >= 0 && (uint32_t)done != len)
             SBError(true, "DVEngine.cpp", 0x3f2, "Processed and expected length are not matching in hunk %.4s.(%u != %d)",
                     (const char*)t, len, done);
         f.Skip(start + (int)len, 0);
@@ -79,12 +85,16 @@ bool DVEngine::LoadStateFromFile(const std::string& name) {
         e->sprite->ComputeDisplayOrder(nullptr, true);
     }
     SortForEngine();
-    // start on the first hero, as StateCenterOn does
-    for (DVElement* e : elements)
-        if (e->kind == KIND_COOPER || (e->kind >= KIND_COOPER && e->kind <= KIND_MIA)) {
-            camera = e->sprite->pos.posMap - screen * 0.5f;
-            break;
-        }
+    // the heroes, in the level's order; the first one is selected (and the camera on him, as
+    // StateCenterOn does)
+    heroes.clear();
+    for (auto& e : ownElements)
+        if (e->kind >= KIND_COOPER && e->kind <= KIND_MIA && e->active) heroes.push_back(static_cast<DVElementActor*>(e.get()));
+    std::sort(heroes.begin(), heroes.end(), [](DVElementActor* a, DVElementActor* b) { return a->kind < b->kind; });
+    if (!heroes.empty()) {
+        Select(heroes[0]);
+        camera = heroes[0]->sprite->pos.posMap - screen * 0.5f;
+    }
     ClampCamera();
     return background != 0;
 }
@@ -220,10 +230,56 @@ void DVEngine::ClampCamera() {
     if (camera.y < 0) camera.y = 0;
 }
 
-// DVEngine::PerformHourglass (0x08272300), the part this step has: the scenery animations
+// DVEngine::PerformHourglass (0x08272300), the part these steps have: every element's 25 Hz
+// step (heroes' orders, scenery animations), then the display order again
 void DVEngine::PerformHourglass() {
     ++ticks;
     for (DVElement* e : elements) e->Hourglass();
+    SortForEngine();
+}
+
+void DVEngine::Select(DVElementActor* h) {
+    for (DVElementActor* o : heroes) o->selected = false;
+    selected = h;
+    if (h) {
+        h->selected = true;
+        h->selectionPulseLen = 20;
+        h->selectionPulse = 20;
+    }
+}
+
+DVElementActor* DVEngine::HeroAt(const SBGeoPoint2D& p, float slack) const {
+    DVElementActor* best = nullptr;
+    for (DVElementActor* h : heroes) {
+        if (!h->active) continue;
+        DVSprite* s = h->sprite.get();
+        SBGeoBoundingBox2D b = s->boxOnMap;
+        if (!b.valid) continue;
+        b.p0 = b.p0 - SBGeoVector2D(slack, slack);
+        b.p1 = b.p1 + SBGeoVector2D(slack, slack);
+        if (!b.IsInside_p(p)) continue;
+        if (!best || best->sprite->displayOrder < s->displayOrder) best = h;
+    }
+    return best;
+}
+
+bool DVEngine::OrderMove(const SBGeoPoint2D& p, bool run) {
+    if (!selected) return false;
+    return selected->MoveTo(p, run);
+}
+
+void DVEngine::OrderMakeRunning() {
+    if (selected) selected->MakeRunning();
+}
+
+void DVEngine::OrderCrouch() {
+    if (!selected) return;
+    if (selected->Posture() == POSTURE_LYING) selected->MakeWalking();
+    else selected->MakeCrawling();
+}
+
+void DVEngine::OrderStop() {
+    if (selected) selected->Stop();
 }
 
 // DVEngine::Draw (0x08276f10) mode 2 / 5 and DrawBackground (0x082797f0)

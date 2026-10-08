@@ -739,3 +739,195 @@ uint16_t DVSprite::GetCurrentSoundID() const {
     if (!r || entry >= r->sounds.size() || tick != 0) return 0;
     return r->sounds[entry];
 }
+
+// ---- actions and motions -----------------------------------------------------------------------
+
+// DVSprite::MaybeInitializeFrame (0x0839a480): a new animation starts at its first frame
+bool DVSprite::MaybeInitializeFrame(uint32_t anim, int p) {
+    if (animation == anim) return false;
+    animation = anim;
+    switch (p) {
+    case 0: case 2: case 3: case 4: case 5: case 7: case 8: case 9: case 0xb:
+        entry = 0;
+        tick = 0xffff;
+        break;
+    case 6: {
+        tick = 0xffff;
+        const auto& R = Rows();
+        int16_t r = HasAnimation(anim) ? animRows[anim] : -1;
+        entry = (r >= 0 && (size_t)r < R.size()) ? R[(size_t)r].keyEntry : 0;
+        break;
+    }
+    case 10:
+        entry = 0;
+        tick = 0;
+        break;
+    case 0xc:
+    case 0xd: {
+        const DVspriteScript* r = CurrentRow();
+        entry = (uint16_t)((r ? count(*r) : 0) - 1);
+        tick = 0xffff;
+        break;
+    }
+    }
+    return true;
+}
+
+// DVSprite::InitializeActionDone (0x0839a5d0): the frame where the action happens
+void DVSprite::InitializeActionDone(uint32_t anim) {
+    const auto& R = Rows();
+    int16_t ri = HasAnimation(anim) ? animRows[anim] : -1;
+    if (ri < 0 || (size_t)ri >= R.size()) return;
+    const DVspriteScript& r = R[(size_t)ri];
+    unsigned n = count(r);
+    doneEntry = r.keyEntry;
+    doneTick = 0;
+    if (n == 1 && dur(r, 0) < 2) {
+        doneEntry = 0x2f9;
+        doneTick = 0x7c0;
+    } else if (doneEntry == 0) {
+        if (dur(r, 0) == 0) doneEntry = 1;
+        else doneTick = 1;
+    } else if ((int)n - 1 <= (int)doneEntry) {
+        if (doneEntry < 2) {
+            doneEntry = 0xffff;
+        } else {
+            doneEntry = (uint16_t)(n - 2);
+            doneTick = dur(r, n - 2);
+        }
+    }
+}
+
+// DVSprite::PerformAction (0x0839b390): plays an animation in place
+int DVSprite::PerformAction(uint32_t order, uint32_t anim, int p, bool restart) {
+    if (!HasAnimation(anim)) {
+        SBError(true, "DVSprite.cpp", 0x447, "Trying to play non-existing animation %u of sprite %s", anim & 0xffff,
+                fileName.c_str());
+        return 4;
+    }
+    row = (uint16_t)(animRows[anim] + pos.direction);
+    int res;
+    bool ended = false;
+    bool same = order == 0 || orderId == order;
+    if (!same) orderId = order;
+    if (same || !restart) {
+        if (!MaybeInitializeFrame(anim, p)) {
+            res = 2;
+            ended = IncrementFrame(p);
+            goto tail;
+        }
+    } else {
+        entry = 0;
+        tick = 0xffff;
+    }
+    InitializeActionDone(anim);
+    res = 1;
+tail:
+    int out = res;
+    if (entry == doneEntry) {
+        out = 0;
+        if (tick != doneTick) out = res;
+    }
+    if (ended) out = 3;
+    return out;
+}
+
+// DVSprite::PerformMotion (0x0839ba10), without the anti-collision: plays the motion animation
+// and moves by the frame's step along the way to the goal (a little less while turning)
+int DVSprite::PerformMotion(uint32_t order, const SBGeoPoint2D& goalPt, float tol, uint32_t anim, int method, int p,
+                            bool restart) {
+    if (!HasAnimation(anim)) {
+        SBError(true, "DVSprite.cpp", 0x4f8, "Trying to play non-existing animation %u of sprite %s", anim & 0xffff,
+                fileName.c_str());
+        return 4;
+    }
+    int res;
+    if (orderId == order) {
+        res = 2;
+    } else {
+        InitializeActionDone(anim);
+        if (restart) {
+            entry = 0;
+            tick = 0xffff;
+        }
+        if (goalPt == pos.posMap) {
+            row = (uint16_t)(pos.direction + animRows[anim]);
+            MaybeInitializeFrame(anim, p);
+            return 3;
+        }
+        orderId = order;
+        pos.goal = goalPt;
+        pos.u4 = 0;
+        pos.reverse = false;
+        pos.tolerance = tol;
+        pos.ComputeIncrementAll(true);
+        res = 1;
+    }
+    row = (uint16_t)(pos.direction + animRows[anim]);
+    MaybeInitializeFrame(anim, p);
+    bool ended = IncrementFrame(p);
+    float step = 0.0f;
+    if (tick == 0) {
+        const DVspriteScript* r = CurrentRow();
+        if (r && entry < r->steps.size()) step = (float)r->steps[entry];
+    }
+    if (method == 3) step = 5.0f;
+    bool moved = false;
+    if (step != 0.0f) {
+        if (pos.direction != pos.directionWanted) {
+            if (method == 6) {
+                IncrementFrame(p);
+                step = step + step;
+            } else {
+                step = step * 0.6f;
+            }
+            if (step < 0.7f) step = 0.7f;
+        }
+        pos.pos3D.x = pos.inc3D.x * step + pos.pos3D.x;
+        pos.pos3D.y = pos.inc3D.y * step + pos.pos3D.y;
+        pos.pos3D.z = pos.inc3D.z * step + pos.pos3D.z;
+        pos.valid = 1;
+        pos.ComputePositionAll();
+        displayOrder = pos.pos3D.y;
+        moved = true;
+    }
+    if (entry == doneEntry) {
+        int t = (tick != doneTick) ? res : 0;
+        if (res != 1) res = t;
+    }
+    if (method == 5) {
+        if (ended) {
+            pos.ComputePositionAll();
+            displayOrder = pos.pos3D.y;
+            return 3;
+        }
+        if (pos.IsGoalReached()) {
+            pos.u4 = 1;
+            pos.incMap = SBGeoVector2D(0, 0);
+            pos.inc3D = SBGeoVector3D(0, 0, 0);  // (the anti-collision moves along incMap)
+        }
+    } else if (moved && pos.IsGoalReached()) {
+        if (!pos.uf6 && pos.tolerance == 0.0f) {
+            pos.SetPositionMap(pos.goal);
+            pos.ComputePositionAll();
+            displayOrder = pos.pos3D.y;
+        }
+        return 3;
+    }
+    pos.ComputePositionAll();
+    return res;
+}
+
+// DVSprite::GetDistanceForAnimation (0x0839f040): the steps of the row added up
+float DVSprite::GetDistanceForAnimation(uint32_t anim) const {
+    if (!HasAnimation(anim)) return 0.0f;
+    const auto& R = Rows();
+    size_t ri = (size_t)animRows[anim];
+    if (ri >= R.size()) return 0.0f;
+    const DVspriteScript& r = R[ri];
+    unsigned n = count(r);
+    if (n == 0) return 0.0f;
+    uint16_t sum = 0;
+    for (unsigned i = 0; i < n && i < r.steps.size(); ++i) sum = (uint16_t)(sum + r.steps[i]);
+    return (float)sum;
+}

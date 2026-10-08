@@ -12,8 +12,10 @@
 class SBFile;
 class SBDrawManager;
 class DVElement;
+class DVElementActor;
 class DVFastFindGrid;
 class DVFrameHolder;
+class DVPathFinder;
 
 class DVEngine {
 public:
@@ -48,18 +50,36 @@ public:
     std::string backgroundName;
     const std::vector<DVElement*>& Elements() const { return elements; }
     DVFastFindGrid* Grid() const { return grid.get(); }
+    DVPathFinder* PathFinder() const { return pathFinder.get(); }
     uint32_t BackgroundSurface() const { return background; }
     uint32_t MinimapSurface() const { return minimap; }
     int ticks = 0;
+
+    // ---- the player's heroes (DVEngine +0xbc: the selection) ----------------------------------
+    const std::vector<DVElementActor*>& Heroes() const { return heroes; }
+    DVElementActor* Selected() const { return selected; }
+    void Select(DVElementActor* hero);
+    // the hero under a map point (DVElementActorPC::IsFocusable), the front-most one
+    DVElementActor* HeroAt(const SBGeoPoint2D& p, float slack) const;
+    // orders for the selected hero (left click / double click on the ground)
+    bool OrderMove(const SBGeoPoint2D& p, bool run);
+    void OrderMakeRunning();
+    // lie down / stand up
+    void OrderCrouch();
+    void OrderStop();
+    bool showPaths = false;  // the debug view of the paths (DisplayPathFindGraph)
 
 private:
     SBDrawManager* draw;
     std::unique_ptr<DVFrameHolder> frames;  // +0x168
     std::unique_ptr<DVFastFindGrid> grid;   // +0x44c
+    std::unique_ptr<DVPathFinder> pathFinder;  // +0xe08
     std::vector<std::unique_ptr<DVElement>> ownElements;
     std::vector<DVElement*> elements;       // +0x84
     uint32_t background = 0;   // +0xba4
     uint32_t minimap = 0;      // +0xba8
+    std::vector<DVElementActor*> heroes;
+    DVElementActor* selected = nullptr;
 
     int LoadMiscFromFile(SBFile& f);
     int LoadBackgroundFromFile(SBFile& f);

@@ -3,6 +3,8 @@
 #include "dv/DVEngine.h"
 #include "dv/DVFastFindGrid.h"
 #include "dv/DVFrameHolder.h"
+#include "dv/DVPathFinder.h"
+#include "dv/DVSector.h"
 #include "sb/SBDrawManager.h"
 #include "sb/SBFile.h"
 
@@ -134,10 +136,287 @@ int DVElementActor::LoadStateFromFile(SBFile& f) {
     return n + 4 + len;
 }
 
-// DVElementActorNPC::Refresh (0x0822cae0), the drawing part
+// DVElementActorNPC::Refresh (0x0822cae0), the drawing part; for the heroes, the selection
+// outline of DVElementActorPC::ShowSelection (0x0823fc50) over it
 void DVElementActor::Refresh(uint32_t screen, float zoom, const SBGeoBoundingBox2D& view, bool silhouettes) {
     if (!active) return;
     DrawSprite(screen, zoom, view, true, silhouettes, true);
+    if (!IsHero() || !selected || surface2 == 0xffffffff) return;
+    DVSprite* s = sprite.get();
+    if (!s->IsOnScreen(view, zoom)) return;
+    // the outline: the free pixels next to the frame's (DVSprite::ApplyEdgeMapToCreateOutline)
+    SBDrawManager* d = SBDrawManager::mpDrawManager;
+    uint32_t id = s->CurrentFrameId();
+    if (id == 0xffffffff || !s->frameHolder) return;
+    SBDrawViewport vp;
+    if (!d->GetSurfaceViewport(surface2, vp, VIEWPORT_WRITE)) return;
+    uint16_t key = vp.colorKey;
+    int w = s->frameHolder->GetSpriteWidth(id), h = s->frameHolder->GetSpriteHeight(id);
+    if (w > vp.width) w = vp.width;
+    if (h > vp.height) h = vp.height;
+    s->frameHolder->UnCompressFrame(vp, id);
+    std::vector<uint8_t> solid((size_t)w * h);
+    uint16_t shadow = shadowKey;
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            uint16_t c = vp.data[(size_t)y * vp.width + x];
+            solid[(size_t)y * w + x] = c != key && c != shadow;
+        }
+    for (int y = 0; y < vp.height; ++y)
+        for (int x = 0; x < vp.width; ++x) {
+            bool edge = false;
+            if (x < w && y < h && !solid[(size_t)y * w + x]) {
+                edge = (x > 0 && solid[(size_t)y * w + x - 1]) || (x + 1 < w && solid[(size_t)y * w + x + 1]) ||
+                       (y > 0 && solid[(size_t)(y - 1) * w + x]) || (y + 1 < h && solid[(size_t)(y + 1) * w + x]);
+            }
+            vp.data[(size_t)y * vp.width + x] = edge ? colorSelect : key;
+        }
+    d->ReleaseSurfaceViewport(vp);
+    SBGeoBoundingBox2D src, dst;
+    s->GenerateBlitBox(view, zoom, src, dst);
+    if (!src.IsOK() || !dst.IsOK()) return;
+    uint16_t pct = 50;
+    if (selectionPulse > 0 && selectionPulseLen > 0)
+        pct = (uint16_t)((int)((float)(selectionPulseLen - selectionPulse) * 60.0f / (float)selectionPulseLen) + 0x28);
+    d->BlitAlphaConstant(surface2, &src, screen, &dst, pct, BLIT_COLORKEY);
+}
+
+// ---- the heroes' motion ------------------------------------------------------------------------
+
+static uint32_t gNextOrderID = 1;  // DVOrder::mulNextID (0 = no order)
+uint32_t DVOrder::NewID() { return gNextOrderID++; }
+
+// DVElementActor::SetStates (0x0820f7b0) with DVElement::SetPosture (0x08249970)
+void DVElementActor::SetStates(uint32_t posture, uint32_t state) {
+    if (sprite->pos.posture != 0xe) sprite->pos.SetPosture(posture);
+    actionState = state;
+}
+
+// DVElementActor::SetDefaultWaitAction (0x0820cbe0), the heroes' cases used so far
+void DVElementActor::SetDefaultWaitAction() {
+    switch (sprite->pos.posture) {
+    case POSTURE_LYING: defaultCommand = CMD_LYING; break;
+    default: defaultCommand = CMD_WAIT; break;
+    }
+}
+
+std::vector<SBGeoPoint2D> DVElementActor::PlannedPath() const {
+    std::vector<SBGeoPoint2D> r;
+    if (orders.empty()) return r;
+    r.push_back(sprite->pos.posMap);
+    for (const DVOrder& o : orders)
+        if (o.command == CMD_WALK || o.command == CMD_RUN || o.command == CMD_CRAWL) r.push_back(o.goal);
+    return r;
+}
+
+// DVElementActor::Translate (0x08211170), command 0x17 "go there": straight there when the way is
+// free (DVFastFindGrid::IsReachableThick), else along the path finder's way (AddPathRequest,
+// DVPathFinder::FindPath, then DVEngine::ProcessPathRequests turns the points into orders)
+bool DVElementActor::BuildMove(const SBGeoPoint2D& goal, uint32_t command, uint32_t movePosture,
+                               std::deque<DVOrder>& out) const {
+    DVSprite* s = sprite.get();
+    DVPositionInterface& pos = s->pos;
+    DVFastFindGrid* grid = s->grid;
+    if (!grid) return false;
+    if (goal.x == 0.0f && goal.y == 0.0f) {
+        SBError(false, "DVElementActor.cpp", 0x9ad, "VERBOTEN: Actor trying to go to (0,0)!");
+        return false;
+    }
+    SBGeoVector2D half = pos.GetMoveBox(movePosture).p1;
+    if (grid->IsReachableThick(pos.posMap, goal, pos.layer, half)) {
+        DVOrder o;
+        o.id = DVOrder::NewID();
+        o.command = command;
+        o.goal = goal;
+        out.push_back(o);
+        return true;
+    }
+    // DVPathFinder::AddPathRequest (0x0832aa40): a start inside a wall is moved out first
+    SBGeoPoint2D start = pos.posMap;
+    SBGeoBoundingBox2D mb = pos.GetMoveBoxMap();
+    bool adjusted = false;
+    if (!grid->IsPositionAutorized(mb, pos.layer)) {
+        adjusted = true;
+        if (!grid->FindAutorizedPosition(mb, pos.layer)) {
+            SBError(false, "DVPathFinder.cpp", 0x19c, "Actor in a wall at (%f,%f)", pos.posMap.x, pos.posMap.y);
+            return false;
+        }
+        start = SBCenter(mb);
+    }
+    if (!pos.sector || (pos.sector->type & 3) != 3) {
+        SBLog("%s is on no walkable area", KindName());
+        return false;
+    }
+    uint16_t area = static_cast<DVSectorMotionArea*>(pos.sector)->areaIndex;
+    DVPathFinder* pf = DVEngine::mpEngine ? DVEngine::mpEngine->PathFinder() : nullptr;
+    if (!pf) return false;
+    std::vector<SBGeoPoint2D> path;
+    if (!pf->FindPath(pos.layer, area, pos.GetPathFinderIndex(movePosture), start, goal, adjusted, path)) {
+        SBLog("no way from %.0f,%.0f to %.0f,%.0f (layer %u area %u size %u)", start.x, start.y, goal.x, goal.y, pos.layer,
+              area, pos.GetPathFinderIndex(movePosture));
+        return false;
+    }
+    for (size_t i = adjusted ? 0 : 1; i < path.size(); ++i) {
+        DVOrder o;
+        o.id = DVOrder::NewID();
+        o.command = command;
+        o.goal = path[i];
+        out.push_back(o);
+    }
+    return !out.empty();
+}
+
+// a move ordered by the player (DVEngine::PerformGroupMove for one hero, 0x08294710): the place
+// is moved out of the walls (FindAutorizedPosition), lying heroes crawl, a run first stands up
+bool DVElementActor::MoveTo(const SBGeoPoint2D& dest, bool run) {
+    DVSprite* s = sprite.get();
+    DVPositionInterface& pos = s->pos;
+    DVFastFindGrid* grid = s->grid;
+    if (!grid || !active) return false;
+    SBGeoBoundingBox2D box = pos.GetMoveBoxMap() - pos.posMap + dest;
+    if (!grid->FindAutorizedPosition(box, dest, pos.layer)) {
+        SBLog("no place near %.0f,%.0f", dest.x, dest.y);
+        return false;
+    }
+    SBGeoPoint2D goal = SBCenter(box);
+    uint32_t posture = pos.posture;
+    std::deque<DVOrder> seq;
+    uint32_t movePosture = posture == POSTURE_LYING ? POSTURE_LYING : POSTURE_STANDING;
+    if (posture == POSTURE_LYING && run) {
+        DVOrder o;
+        o.id = DVOrder::NewID();
+        o.command = CMD_STAND_UP;
+        seq.push_back(o);
+        movePosture = POSTURE_STANDING;
+    }
+    uint32_t cmd = run ? CMD_RUN : (movePosture == POSTURE_LYING ? CMD_CRAWL : CMD_WALK);
+    if (!BuildMove(goal, cmd, movePosture, seq)) return false;
+    orders = seq;
+    newOrder = true;
+    return true;
+}
+
+void DVElementActor::Stop() {
+    orders.clear();
+    newOrder = true;
+    defaultCommand = CMD_NONE;
+}
+
+// DVElementActor::MakeRunning (0x08214dd0): the move goes on running (standing up first)
+void DVElementActor::MakeRunning() {
+    if (orders.empty()) return;
+    bool lying = sprite->pos.posture == POSTURE_LYING;
+    for (DVOrder& o : orders)
+        if (o.command == CMD_WALK || o.command == CMD_CRAWL) o.command = CMD_RUN;
+    if (lying && orders.front().command != CMD_STAND_UP) {
+        DVOrder o;
+        o.id = DVOrder::NewID();
+        o.command = CMD_STAND_UP;
+        orders.push_front(o);
+        newOrder = true;
+    }
+}
+
+// DVElementActor::MakeCrawling (0x08214a30) with the hero's 0x47 (DVElementActorPC::Translate):
+// lie down a little ahead (as far as the animation goes), then crawl on
+void DVElementActor::MakeCrawling() {
+    DVSprite* s = sprite.get();
+    DVPositionInterface& pos = s->pos;
+    if (pos.posture == POSTURE_LYING) return;
+    for (DVOrder& o : orders)
+        if (o.command == CMD_WALK || o.command == CMD_RUN) o.command = CMD_CRAWL;
+    DVFastFindGrid* grid = s->grid;
+    if (!grid) return;
+    SBGeoBoundingBox2D box = pos.GetMoveBox(POSTURE_LYING) + pos.posMap;
+    box = box + SBSetSector0to15(pos.direction, 1.0f) * s->GetDistanceForAnimation(CMD_LIE_DOWN);
+    if (!grid->FindAutorizedPosition(box, pos.posMap, pos.layer)) return;
+    DVOrder o;
+    o.id = DVOrder::NewID();
+    o.command = CMD_LIE_DOWN;
+    o.goal = SBCenter(box);
+    orders.push_front(o);
+    newOrder = true;
+}
+
+// DVElementActor::MakeWalking (0x08214bb0): a lying hero stands up (0x46 -> order 10) and the move
+// goes on walking
+void DVElementActor::MakeWalking() {
+    for (DVOrder& o : orders)
+        if (o.command == CMD_RUN || o.command == CMD_CRAWL) o.command = CMD_WALK;
+    if (sprite->pos.posture != POSTURE_LYING) return;
+    DVOrder o;
+    o.id = DVOrder::NewID();
+    o.command = CMD_STAND_UP;
+    orders.push_front(o);
+    newOrder = true;
+}
+
+// DVElementActor::Hourglass (0x0820b2e0) with the heroes' Execute (DVElementActorPC 0x08244e80,
+// DVElementActorHuman 0x0821e420, DVElementActor 0x0820da70) for the commands of this step
+void DVElementActor::Hourglass() {
+    if (selectionPulse > 0) --selectionPulse;
+    if (!IsHero() || !active) return;
+    DVSprite* s = sprite.get();
+    DVPositionInterface& pos = s->pos;
+    if (orders.empty()) {
+        if (defaultCommand == CMD_NONE) SetDefaultWaitAction();
+        if (defaultCommand == CMD_LYING) {
+            s->PerformAction(0, CMD_LYING, 0xb, false);
+        } else {
+            int r = s->PerformAction(0, CMD_WAIT, 4, false);
+            if (r == 1) SetStates(POSTURE_STANDING, 0);
+        }
+        return;
+    }
+    DVOrder& o = orders.front();
+    bool first = newOrder;
+    newOrder = false;
+    int r = 4;
+    switch (o.command) {
+    case CMD_WALK:
+        pos.Turn();
+        r = s->PerformMotion(o.id, o.goal, o.tolerance, CMD_WALK, 1, 0, false);
+        if (r == 1) SetStates(POSTURE_STANDING, 1);
+        else if (r == 3) SetStates(POSTURE_STANDING, 0);
+        break;
+    case CMD_RUN:
+        pos.Turn();
+        r = s->PerformMotion(o.id, o.goal, o.tolerance, CMD_RUN, 2, 0, false);
+        if (r == 1) SetStates(POSTURE_STANDING, 1);
+        else if (r == 3) SetStates(POSTURE_STANDING, 0);
+        break;
+    case CMD_CRAWL:
+        pos.Turn();
+        r = s->PerformMotion(o.id, o.goal, o.tolerance, CMD_CRAWL, 1, 0, false);
+        if (r == 3) SetStates(POSTURE_LYING, 0);
+        break;
+    case CMD_LIE_DOWN:
+        if (!first && pos.incMap.x == 0.0f && pos.incMap.y == 0.0f && s->orderId == o.id)
+            r = s->PerformAction(o.id, CMD_LIE_DOWN, 0, false);
+        else
+            r = s->PerformMotion(o.id, o.goal, 0.0f, CMD_LIE_DOWN, 5, 0, false);
+        if (r == 1) {
+            SetStates(POSTURE_LYING, 0);
+            defaultCommand = CMD_LYING;
+        }
+        break;
+    case CMD_STAND_UP:
+        if (first && pos.posture != POSTURE_LYING) {
+            SetStates(POSTURE_STANDING, 0);
+            r = 3;
+            break;
+        }
+        r = s->PerformAction(o.id, CMD_STAND_UP, 0, false);
+        if (r == 1) SetStates(POSTURE_GETTING_UP, 0);
+        else if (r == 3) SetStates(POSTURE_STANDING, 0);
+        break;
+    }
+    if (r == 3 || r == 4) {
+        orders.pop_front();
+        newOrder = true;
+        if (orders.empty()) defaultCommand = CMD_NONE;
+    }
+    s->displayOrder = pos.pos3D.y;
 }
 
 // ---- objects ------------------------------------------------------------------------------

@@ -38,6 +38,8 @@ class DVSectorMotionArea : public DVSector {
 public:
     DVSectorMotionArea() : DVSector(SECTOR_MOTION) {}
     bool isLift = false;  // the last layer's areas are DVSectorLift
+    uint16_t areaIndex = 0;  // +0x50: its index in its layer (DVPathFinder::ConvertSector)
+    bool flagC0 = false;     // +0xc0
 };
 
 class DVSightObstacle {

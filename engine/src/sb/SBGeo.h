@@ -114,3 +114,100 @@ struct SBGeoBoundingBox2D {
     SBGeoBoundingBox2D operator+(const SBGeoVector2D& v) const { return {p0 + v, p1 + v}; }
     SBGeoBoundingBox2D operator-(const SBGeoVector2D& v) const { return {p0 - v, p1 - v}; }
 };
+
+// ---- the vector and intersection helpers of the original (SBGeoVector2D.cpp, SBGeoSegment2D.cpp,
+// SBGeoBoundingBox2D.cpp), with their exact comparisons -----------------------------------------
+
+// SBGeoVector2D::Det (0x0817c630): a.x * b.y - a.y * b.x
+inline float SBDet(const SBGeoVector2D& a, const SBGeoVector2D& b) { return b.y * a.x - b.x * a.y; }
+// SBGeoVector2D::operator* (dot product)
+inline float SBDot(const SBGeoVector2D& a, const SBGeoVector2D& b) { return a.x * b.x + a.y * b.y; }
+inline float SBNorm(const SBGeoVector2D& v) { return std::sqrt(v.y * v.y + v.x * v.x); }
+// SBGeoVector2D::Normalize (0x0817c7a0)
+inline void SBNormalize(SBGeoVector2D& v) {
+    float n = std::sqrt(v.y * v.y + v.x * v.x);
+    v.x = v.x / n;
+    v.y = v.y / n;
+}
+// SBGeoVector2D::MaxNorm (0x0817c6f0)
+inline float SBMaxNorm(const SBGeoVector2D& v) {
+    float ax = std::fabs(v.x), ay = std::fabs(v.y);
+    return ax < ay ? ay : ax;
+}
+// SBGeoVector2D::GetNormal (0x0817c8b0): false = (y, -x), true = (-y, x)
+inline SBGeoVector2D SBGetNormal(const SBGeoVector2D& v, bool left) {
+    return left ? SBGeoVector2D(-v.y, v.x) : SBGeoVector2D(v.y, -v.x);
+}
+// SBGeoVector2D::GetSector0to15 (0x0817cbd0): 0 = up, 4 = right, 8 = down, 12 = left
+inline unsigned SBGetSector0to15(const SBGeoVector2D& v, float k = 1.0f) {
+    float fx = v.x * 0.98078525f * k - v.y * 0.19509032f;
+    float fy = v.y * 0.98078525f + v.x * 0.19509032f * k;
+    bool neg = fx < 0.0f;
+    if (fx < 0.0f) fx = -fx;
+    bool pos = 0.0f < fy;
+    if (fy <= 0.0f) fy = -fy;
+    bool b4 = fx * 0.41421357f < fy;
+    if (fx <= fy) b4 = fy * 0.41421357f < fx;
+    unsigned r = (unsigned)neg << 3;
+    bool t = pos != neg;
+    if (t) r |= 4;
+    t = t != (fy < fx);
+    if (t) r |= 2;
+    return (unsigned)(t ^ b4) | r;
+}
+// SBGeoVector2D::SetSector0to15 (0x0817cc80), with the tables marraySectorX / Y (0x0855753c)
+inline SBGeoVector2D SBSetSector0to15(unsigned d, float k = 1.0f) {
+    static const float X[16] = {0.0f, 0.38268343f, 0.70710677f, 0.9238795f, 1.0f, 0.9238795f, 0.70710677f, 0.38268343f,
+                                0.0f, -0.38268343f, -0.70710677f, -0.9238795f, -1.0f, -0.9238795f, -0.70710677f, -0.38268343f};
+    static const float Y[16] = {-1.0f, -0.9238795f, -0.70710677f, -0.38268343f, 0.0f, 0.38268343f, 0.70710677f, 0.9238795f,
+                                1.0f, 0.9238795f, 0.70710677f, 0.38268343f, 0.0f, -0.38268343f, -0.70710677f, -0.9238795f};
+    return SBGeoVector2D(X[d & 0xf] * k, Y[d & 0xf]);
+}
+// SBGeoBoundingBox2D::GetCenter (0x0815a2b0)
+inline SBGeoPoint2D SBCenter(const SBGeoBoundingBox2D& b) { return SBGeoPoint2D((b.p0.x + b.p1.x) / 2.0f, (b.p0.y + b.p1.y) / 2.0f); }
+
+// SBGeoSegment2D::IsIntersecting(SBGeoSegment2D const&) (0x0817a490)
+inline bool SBIntersects(const SBGeoSegment2D& s, const SBGeoSegment2D& t) {
+    SBGeoBoundingBox2D bs, bt;
+    bs.Expand(s.a);
+    bs.Expand(s.b);
+    bt.Expand(t.a);
+    bt.Expand(t.b);
+    if (!bs.IsIntersecting(bt)) return false;
+    SBGeoVector2D d1 = s.a - s.b;
+    SBGeoVector2D d2 = t.b - t.a;
+    SBGeoVector2D w = t.a - s.a;
+    float a = SBDet(d1, w);
+    float b = SBDet(d1, t.b - s.a);
+    if (!((0.0f <= a && b <= 0.0f) || (a <= 0.0f && 0.0f <= b))) return false;
+    float c = SBDet(d2, w);
+    float e = SBDet(d2, s.b - t.a);
+    if (0.0f < c || 0.0f < e) return 0.0f <= e && 0.0f <= c;
+    return true;
+}
+// SBGeoBoundingBox2D::IsIntersecting(SBGeoLine2D const&) (0x08159090): the box's corners are
+// not all strictly on one side of the line through the segment
+inline bool SBBoxIntersectsLine(const SBGeoBoundingBox2D& box, const SBGeoSegment2D& l) {
+    if (!box.valid) return false;
+    if (box.IsTriviallyRejected(l)) return false;
+    SBGeoVector2D d = l.b - l.a;
+    SBGeoPoint2D c1(box.p1.x, box.p0.y), c3(box.p0.x, box.p1.y);
+    float f = SBDet(d, box.p0 - l.a);
+    if (f == 0.0f) return true;
+    if (f <= 0.0f) {
+        if (!(SBDet(d, c1 - l.a) < 0.0f)) return true;
+        if (!(SBDet(d, box.p1 - l.a) < 0.0f)) return true;
+        return 0.0f <= SBDet(d, c3 - l.a);
+    }
+    if (!(0.0f < SBDet(d, c1 - l.a))) return true;
+    if (!(0.0f < SBDet(d, box.p1 - l.a))) return true;
+    return SBDet(d, c3 - l.a) <= 0.0f;
+}
+// SBGeoBoundingBox2D::IsIntersecting(SBGeoSegment2D const&) (0x08158fb0)
+inline bool SBIntersects(const SBGeoBoundingBox2D& box, const SBGeoSegment2D& s) {
+    if (!box.valid) return false;
+    if (box.IsTriviallyRejected(s)) return false;
+    if (box.p0.x <= s.a.x && s.a.x <= box.p1.x && box.p0.y <= s.a.y && s.a.y <= box.p1.y) return true;
+    if (box.p0.x <= s.b.x && s.b.x <= box.p1.x && box.p0.y <= s.b.y && s.b.y <= box.p1.y) return true;
+    return SBBoxIntersectsLine(box, s);
+}

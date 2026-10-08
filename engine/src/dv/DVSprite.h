@@ -70,10 +70,24 @@ public:
     bool IsEmptyFrame() const;
     uint16_t GetCurrentSoundID() const;
 
+    // ---- actions and motions (one call per 25 Hz tick). Results: 1 = started, 2 = going on,
+    // 0 = the row's action frame reached, 3 = finished, 4 = error.
+    bool HasAnimation(uint32_t anim) const { return anim < animRows.size() && animRows[anim] != -1; }
+    bool MaybeInitializeFrame(uint32_t anim, int progression);
+    void InitializeActionDone(uint32_t anim);
+    // orderId 0 = no order
+    int PerformAction(uint32_t orderId, uint32_t anim, int progression, bool restart);
+    // walks toward `goal` (a new orderId starts a new leg)
+    int PerformMotion(uint32_t orderId, const SBGeoPoint2D& goal, float tolerance, uint32_t anim, int method,
+                      int progression, bool restart);
+    float GetDistanceForAnimation(uint32_t anim) const;
+
     DVPositionInterface pos;          // +4
     uint16_t row = 0;                 // +0x14c (low half of the u32)
     uint16_t entry = 0;               // +0x14e
     uint16_t tick = 0xffff;           // +0x150 ticks spent on the current frame
+    uint32_t orderId = 0xffffffff;    // +0x148 the order being played
+    uint16_t doneEntry = 0, doneTick = 0;  // +0x154, +0x156 the row's action frame
     std::vector<int16_t> animRows;    // +0x15c anim id -> first row (185 entries)
     std::vector<int16_t> animRowsAlt; // +0x178
     std::vector<DVspriteScript> rows;     // +0x194
