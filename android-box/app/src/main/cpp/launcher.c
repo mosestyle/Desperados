@@ -181,7 +181,8 @@ static pid_t startGame(const char* game, const char* gameExe, const char* libDir
     snprintf(e[n++], 700, "DESP_BRIDGE_FD=%d", sock);
     snprintf(e[n++], 700, "DESP_GAME_EXE=%s", exe);
     snprintf(e[n++], 700, "SDL_VIDEODRIVER=offscreen");
-    snprintf(e[n++], 700, "SDL_AUDIODRIVER=disk");
+    // without the pipe, the disk driver would fill a real file forever: no sound instead
+    snprintf(e[n++], 700, "SDL_AUDIODRIVER=%s", fifo[0] ? "disk" : "dummy");
     snprintf(e[n++], 700, "SDL_DISKAUDIOFILE=%s", fifo);
     snprintf(e[n++], 700, "SDL_OFFSCREEN_WIDTH=%d", gw);
     snprintf(e[n++], 700, "SDL_OFFSCREEN_HEIGHT=%d", gh);
@@ -336,7 +337,7 @@ int SDL_main(int argc, char* argv[]) {
         } else logf_("can't write %s: %s", rcFile, strerror(errno));
     }
     unlink(fifo);
-    if (mkfifo(fifo, 0600) != 0) logf_("mkfifo: %s", strerror(errno));
+    if (mkfifo(fifo, 0600) != 0) { logf_("no sound: can't make the audio pipe (%s)", strerror(errno)); fifo[0] = 0; }
 
     int sv[2];
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) { say("Desperados", "socketpair failed"); return 1; }
@@ -344,7 +345,7 @@ int SDL_main(int argc, char* argv[]) {
     pid_t pid = startGame(game, gameExe, libDir, linkDir, x86Dir, fifo, userDir, rcFile, files, sv[1], logFd, gw, gh);
     close(sv[1]);
     if (pid < 0) { say("Desperados", "Couldn't start the game process."); return 1; }
-    SDL_CreateThread(audioThread, "audio", fifo);
+    if (fifo[0]) SDL_CreateThread(audioThread, "audio", fifo);
 
     desp_replay* r = desp_replay_create(sv[0]);
     int rect[4] = {0, 0, sw, sh};
