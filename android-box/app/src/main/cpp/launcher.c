@@ -70,7 +70,7 @@ static int copyAsset(const char* src, const char* dst) {
     struct stat st;
     if (stat(dst, &st) == 0 && st.st_size == size) { SDL_RWclose(in); return 1; }
     FILE* out = fopen(dst, "wb");
-    if (!out) { SDL_RWclose(in); return 0; }
+    if (!out) { logf_("can't write %s: %s", dst, strerror(errno)); SDL_RWclose(in); return 0; }
     char buf[65536];
     size_t got;
     while ((got = SDL_RWread(in, buf, 1, sizeof buf)) > 0) fwrite(buf, 1, got, out);

@@ -58,10 +58,11 @@ jobs:
 
       - name: Get Box64's x86 runtime libraries
         run: |
-          [ -d box64-src ] || { mkdir box64-src && cd box64-src && git init -q && git remote add origin https://github.com/ptitSeb/box64 \
-            && git fetch -q --depth 1 origin "$BOX64_COMMIT" && git checkout -q FETCH_HEAD; }
-          mkdir -p android-box/app/src/main/assets/x86lib
-          cp "$GITHUB_WORKSPACE"/box64-src/x86lib/libstdc++.so.6 "$GITHUB_WORKSPACE"/box64-src/x86lib/libgcc_s.so.1 android-box/app/src/main/assets/x86lib/
+          [ -d box64-src ] || ( mkdir box64-src && cd box64-src && git init -q && git remote add origin https://github.com/ptitSeb/box64 \
+            && git fetch -q --depth 1 origin "$BOX64_COMMIT" && git checkout -q FETCH_HEAD )
+          mkdir -p "$GITHUB_WORKSPACE"/android-box/app/src/main/assets/x86lib
+          cp "$GITHUB_WORKSPACE"/box64-src/x86lib/libstdc++.so.6 "$GITHUB_WORKSPACE"/box64-src/x86lib/libgcc_s.so.1 "$GITHUB_WORKSPACE"/android-box/app/src/main/assets/x86lib/
+          ls -la "$GITHUB_WORKSPACE"/android-box/app/src/main/assets/x86lib
 
       - name: Get SDL2
         run: |
@@ -144,6 +145,8 @@ jobs:
         run: |
           cp android-box/app/build/outputs/apk/release/app-release.apk DesperadosOriginal.apk
           unzip -l DesperadosOriginal.apk | grep -E "\.so|x86lib"
+          unzip -l DesperadosOriginal.apk | grep -q "assets/x86lib/libstdc++.so.6" || { echo "::error::x86 libraries missing from the APK"; exit 1; }
+          unzip -l DesperadosOriginal.apk | grep -q "lib/arm64-v8a/libchild_sigsys.so" || { echo "::error::sigsys guard missing"; exit 1; }
           ls -la DesperadosOriginal.apk
 
       - uses: actions/upload-artifact@v4
