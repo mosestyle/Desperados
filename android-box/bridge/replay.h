@@ -17,6 +17,20 @@ int desp_replay_frame(desp_replay* r, int timeoutMs);
 // with black bars; writes where it landed (screen pixels) to *outRect when not NULL.
 void desp_replay_present(desp_replay* r, int screenW, int screenH, int outRect[4]);
 
+// The same, with the game's picture (without the game's own black bars) fitted into `area`
+// (x, y, w, h; screen pixels, origin bottom-left; NULL = the whole screen), keeping its shape.
+// outRect: where the whole game window landed (for mapping touches); picRect: where the
+// picture landed. overlay(ctx) is called afterwards to draw on top (any GL state it changes is
+// restored).
+void desp_replay_present_ex(desp_replay* r, int screenW, int screenH, const int area[4], int outRect[4],
+                            int picRect[4], void (*overlay)(void*), void* ctx);
+
+// The game's picture inside its window (OP_VIEW_RECT): x, y, w, h (window pixels, top-left
+// origin), picture width and height in the game's own units, flags (VIEW_IN_MISSION).
+void desp_replay_view(desp_replay* r, int view[7]);
+// The texture holding the game's window (rows bottom-up), 0 before the game started drawing.
+unsigned desp_replay_game_texture(desp_replay* r);
+
 // While waiting for the game's first picture: the same, plus a moving bar near the bottom of
 // the screen so it's clear the app is working. `seconds`: time since the game was started.
 void desp_replay_present_waiting(desp_replay* r, int screenW, int screenH, float seconds);

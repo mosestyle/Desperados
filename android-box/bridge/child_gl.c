@@ -259,10 +259,13 @@ static void mouseTo(int x, int y) {
     if (gw < 1 || gh < 1) { gw = w; gh = h; }
     double s = (double)w / gw < (double)h / gh ? (double)w / gw : (double)h / gh;
     double gx = (x - (w - gw * s) / 2) / s, gy = (y - (h - gh * s) / 2) / s;
-    if (gx < 0) gx = 0;
-    if (gy < 0) gy = 0;
-    if (gx > gw - 1) gx = gw - 1;
-    if (gy > gh - 1) gy = gh - 1;
+    // in a mission the game scrolls while the cursor touches the screen edge: keep it a few
+    // pixels inside, so a tap near the edge doesn't leave the map scrolling by itself
+    double m = gsym.engine && *(volatile uint32_t*)gsym.engine ? 8 : 0;
+    if (gx < m) gx = m;
+    if (gy < m) gy = m;
+    if (gx > gw - 1 - m) gx = gw - 1 - m;
+    if (gy > gh - 1 - m) gy = gh - 1 - m;
     pushMotion(-30000, -30000);
     pushMotion((int)(gx / factor + 0.5), (int)(gy / factor + 0.5));
 }
@@ -332,14 +335,24 @@ static int panCamera(double dxWin, double dyWin) {
     return 1;
 }
 
-static int lastView[4];
+static int inMission(void) {
+    resolveGameSymbols();
+    return gsym.engine && *(volatile uint32_t*)gsym.engine != 0;
+}
+
+static int lastView[7];
 static void sendViewRect(void) {
-    int r[4];
+    int r[7];
     viewRect(r);
+    double pw, ph;
+    pictureSize(&pw, &ph);
+    r[4] = (int)pw;
+    r[5] = (int)ph;
+    r[6] = inMission() ? VIEW_IN_MISSION : 0;
     if (!memcmp(r, lastView, sizeof r)) return;
     memcpy(lastView, r, sizeof r);
-    uint8_t* p = msg(OP_VIEW_RECT, 16);
-    PUT(p, r[0]); PUT(p, r[1]); PUT(p, r[2]); PUT(p, r[3]);
+    uint8_t* p = msg(OP_VIEW_RECT, sizeof r);
+    for (int i = 0; i < 7; ++i) PUT(p, r[i]);
 }
 
 static void deliverInput(const desp_input* in) {

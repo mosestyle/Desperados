@@ -30,6 +30,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "controls.h"
+#include "overlay.h"
 #include "replay.h"
 
 #define LOG(...) __android_log_print(ANDROID_LOG_INFO, "Desperados", __VA_ARGS__)
@@ -152,11 +154,20 @@ static int audioThread(void* arg) {
     logf_("audio: %d Hz, format %#x, %d channels", want.freq, want.format, want.channels);
     SDL_PauseAudioDevice(audioDev, 0);
     const Uint32 bytesPerSec = (Uint32)want.freq * want.channels * (SDL_AUDIO_BITSIZE(want.format) / 8);
-    char buf[8192];
+    // The phone's audio output sets the pace: keep ~60 ms queued and simply stop reading while
+    // that's full. The game's sound thread then waits on the (small) pipe instead of its own
+    // timer, so nothing is ever dropped (dropping data whenever the queue was full made the
+    // sound skip).
+#ifdef F_SETPIPE_SZ
+    fcntl(fd, F_SETPIPE_SZ, 8192);
+#endif
+    const Uint32 target = bytesPerSec * 60 / 1000;
+    char buf[4096];
     for (;;) {
         ssize_t r = read(fd, buf, sizeof buf);
         if (r <= 0 || leaving) break;
-        if (SDL_GetQueuedAudioSize(audioDev) > bytesPerSec / 4) continue;  // keep the delay short
+        while (!leaving && SDL_GetQueuedAudioSize(audioDev) > target) SDL_Delay(2);
+        if (leaving) break;
         SDL_QueueAudio(audioDev, buf, (Uint32)r);
     }
     close(fd);
@@ -173,7 +184,7 @@ static pid_t startGame(const char* game, const char* gameExe, const char* libDir
     snprintf(box, sizeof box, "%s/libbox64g.so", libDir);
     snprintf(exe, sizeof exe, "%s", gameExe);
     snprintf(ldPath, sizeof ldPath, "%s", linkDir);
-    char e[24][700];
+    char e[32][700];
     int n = 0;
     snprintf(e[n++], 700, "LD_LIBRARY_PATH=%s", linkDir);
     snprintf(e[n++], 700, "BOX64_LD_LIBRARY_PATH=%s", x86Dir);
@@ -197,6 +208,7 @@ static pid_t startGame(const char* game, const char* gameExe, const char* libDir
     // without the pipe, the disk driver would fill a real file forever: no sound instead
     snprintf(e[n++], 700, "SDL_AUDIODRIVER=%s", fifo[0] ? "disk" : "dummy");
     snprintf(e[n++], 700, "SDL_DISKAUDIOFILE=%s", fifo);
+    snprintf(e[n++], 700, "SDL_DISKAUDIODELAY=0");  // no timer: the pipe (read at the speaker's pace) paces it
     snprintf(e[n++], 700, "SDL_OFFSCREEN_WIDTH=%d", gw);
     snprintf(e[n++], 700, "SDL_OFFSCREEN_HEIGHT=%d", gh);
     snprintf(e[n++], 700, "HOME=%s", userDir);
@@ -205,7 +217,7 @@ static pid_t startGame(const char* game, const char* gameExe, const char* libDir
     snprintf(e[n++], 700, "PATH=/system/bin");
     snprintf(e[n++], 700, "LANG=C");
     snprintf(e[n++], 700, "XDG_RUNTIME_DIR=%s", runDir);
-    char* envp[25];
+    char* envp[33];
     for (int i = 0; i < n; ++i) envp[i] = e[i];
     envp[n] = NULL;
     char guard[600];
@@ -224,40 +236,6 @@ static pid_t startGame(const char* game, const char* gameExe, const char* libDir
     return pid;
 }
 
-// ---------------------------------------------------------------------------------------------
-// touch -> the game's mouse
-
-typedef struct {
-    SDL_FingerID id;
-    int active, dragged, longFired;
-    float sx, sy;          // where it went down (screen px)
-    float lx, ly;          // where the last drag step was sent from (screen px)
-    Uint32 downAt;
-} touch_t;
-
-static void toGame(desp_replay* r, const int rect[4], int sh, float sx, float sy, int* gx, int* gy) {
-    int gw, gh;
-    desp_replay_game_size(r, &gw, &gh);
-    // rect is in GL coordinates (origin bottom-left); touches have their origin top-left
-    float top = (float)(sh - rect[1] - rect[3]);
-    float u = (sx - rect[0]) / (float)rect[2], v = (sy - top) / (float)rect[3];
-    if (u < 0) u = 0;
-    if (u > 1) u = 1;
-    if (v < 0) v = 0;
-    if (v > 1) v = 1;
-    *gx = (int)(u * gw);
-    *gy = (int)(v * gh);
-}
-
-static void sendMouse(desp_replay* r, int type, int x, int y, int button) {
-    desp_input in;
-    memset(&in, 0, sizeof in);
-    in.type = (uint32_t)type;
-    in.x = x;
-    in.y = y;
-    in.button = (uint32_t)button;
-    desp_replay_send_input(r, &in);
-}
 static void sendKey(desp_replay* r, int down, int scancode, int keycode) {
     desp_input in;
     memset(&in, 0, sizeof in);
@@ -329,6 +307,7 @@ static int leave(int code) {
     }
     if (audioDev) { SDL_CloseAudioDevice(audioDev); audioDev = 0; }
     if (replay) { desp_replay_destroy(replay); replay = NULL; }
+    overlay_shutdown();
     desp_replay_set_logger(NULL);
     if (ctx) { SDL_GL_DeleteContext(ctx); ctx = NULL; }
     if (win) { SDL_DestroyWindow(win); win = NULL; }
@@ -460,8 +439,8 @@ int SDL_main(int argc, char* argv[]) {
     }
 
     replay = desp_replay_create(sv[0]);
-    int rect[4] = {0, 0, sw, sh};
-    touch_t t = {0};
+    controls_init(replay);
+    int rect[4] = {0, 0, sw, sh}, pic[4] = {0, 0, sw, sh};
     int frames = 0, running = 1;
     Uint32 started = SDL_GetTicks(), lastNote = started;
     while (running) {
@@ -476,72 +455,13 @@ int SDL_main(int argc, char* argv[]) {
             case SDL_WINDOWEVENT:
                 if (ev.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) SDL_GL_GetDrawableSize(win, &sw, &sh);
                 break;
-            case SDL_FINGERDOWN:
-                if (t.active || !frames) break;  // one finger at a time for now
-                t.active = 1;
-                t.id = ev.tfinger.fingerId;
-                t.dragged = t.longFired = 0;
-                t.sx = ev.tfinger.x * sw;
-                t.sy = ev.tfinger.y * sh;
-                t.downAt = SDL_GetTicks();
-                {
-                    int gx, gy;
-                    toGame(replay, rect, sh, t.sx, t.sy, &gx, &gy);
-                    sendMouse(replay, IN_MOUSE_TO, gx, gy, 0);
-                }
-                break;
-            case SDL_FINGERMOTION:
-                if (!t.active || ev.tfinger.fingerId != t.id) break;
-                {
-                    // a drag moves the camera in a mission (the picture follows the finger),
-                    // and the cursor in the menus
-                    float x = ev.tfinger.x * sw, y = ev.tfinger.y * sh;
-                    float dx = x - t.sx, dy = y - t.sy, slop = sh * 0.02f;
-                    if (!t.dragged && dx * dx + dy * dy > slop * slop) {
-                        t.dragged = 1;
-                        t.lx = t.sx;
-                        t.ly = t.sy;
-                    }
-                    if (t.dragged && rect[2] > 0 && rect[3] > 0) {
-                        int gw, gh, gx, gy;
-                        desp_replay_game_size(replay, &gw, &gh);
-                        toGame(replay, rect, sh, x, y, &gx, &gy);
-                        desp_input in;
-                        memset(&in, 0, sizeof in);
-                        in.type = IN_PAN;
-                        in.x = gx;
-                        in.y = gy;
-                        in.dx = (int32_t)((x - t.lx) * gw / rect[2] * 16);
-                        in.dy = (int32_t)((y - t.ly) * gh / rect[3] * 16);
-                        t.lx = x;
-                        t.ly = y;
-                        desp_replay_send_input(replay, &in);
-                    }
-                }
-                break;
-            case SDL_FINGERUP:
-                if (!t.active || ev.tfinger.fingerId != t.id) break;
-                t.active = 0;
-                if (!t.dragged && !t.longFired) {
-                    int gx, gy;
-                    toGame(replay, rect, sh, t.sx, t.sy, &gx, &gy);
-                    sendMouse(replay, IN_MOUSE_TO, gx, gy, 0);
-                    sendMouse(replay, IN_MOUSE_DOWN, gx, gy, SDL_BUTTON_LEFT);
-                    sendMouse(replay, IN_MOUSE_UP, gx, gy, SDL_BUTTON_LEFT);
-                }
+            case SDL_FINGERDOWN: case SDL_FINGERMOTION: case SDL_FINGERUP:
+                if (frames) controls_event(&ev, sw, sh);
                 break;
             default: break;
             }
         }
-        // long press: right click
-        if (t.active && !t.dragged && !t.longFired && SDL_GetTicks() - t.downAt > 500) {
-            int gx, gy;
-            toGame(replay, rect, sh, t.sx, t.sy, &gx, &gy);
-            sendMouse(replay, IN_MOUSE_TO, gx, gy, 0);
-            sendMouse(replay, IN_MOUSE_DOWN, gx, gy, SDL_BUTTON_RIGHT);
-            sendMouse(replay, IN_MOUSE_UP, gx, gy, SDL_BUTTON_RIGHT);
-            t.longFired = 1;
-        }
+        controls_update();
 
         int got = desp_replay_frame(replay, frames ? 8 : 16);
         if (got == 0) {
@@ -565,7 +485,10 @@ int SDL_main(int argc, char* argv[]) {
         Uint32 now = SDL_GetTicks();
         if (got > 0) {
             ++frames;
-            desp_replay_present(replay, sw, sh, rect);
+            int area[4];
+            controls_area(sw, sh, area);
+            desp_replay_present_ex(replay, sw, sh, area, rect, pic, controls_draw, NULL);
+            controls_placed(rect, pic);
             SDL_GL_SwapWindow(win);
             if (frames == 1) logf_("first picture from the game after %.1f s", (now - started) / 1000.0);
         } else if (frames == 0) {

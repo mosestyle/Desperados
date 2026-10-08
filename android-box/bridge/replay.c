@@ -50,7 +50,7 @@ struct desp_replay {
     GLuint blitProg, blitVao, blitVbo;
     int haveFrame;
     unsigned long long bytes, commands;
-    int view[4], hasView;  // the game's picture inside its window (top-left origin), see OP_VIEW_RECT
+    int view[7], hasView;  // the game's picture inside its window (top-left origin), see OP_VIEW_RECT
 };
 
 static GLuint* nameSlot(desp_replay* r, uint32_t n) {
@@ -227,7 +227,8 @@ static void execute(desp_replay* r, uint16_t op, uint8_t* p, uint32_t len) {
         break;
     }
     case OP_VIEW_RECT: {
-        for (int i = 0; i < 4; ++i) r->view[i] = GET(int32_t);
+        memset(r->view, 0, sizeof r->view);
+        for (int i = 0; i < 7 && (size_t)(end - p) >= 4; ++i) r->view[i] = GET(int32_t);
         r->hasView = r->view[2] > 0 && r->view[3] > 0;
         break;
     }
@@ -480,8 +481,13 @@ static GLuint compile(GLenum type, const char* src) {
     return s;
 }
 
-static void present(desp_replay* r, int sw, int sh, int outRect[4], float waiting) {
+static void present(desp_replay* r, int sw, int sh, const int area[4], int outRect[4], int picRect[4],
+                    float waiting, void (*overlay)(void*), void* ctx) {
     if (!r->blitProg) {
+        // (made while the game's objects are bound: put them back afterwards)
+        GLint prevVao = 0, prevBuf = 0;
+        glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &prevVao);
+        glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &prevBuf);
         GLuint vs = compile(GL_VERTEX_SHADER,
             "#version 300 es\nin vec2 pos; out vec2 uv; void main(){ uv = pos * 0.5 + 0.5; gl_Position = vec4(pos, 0.0, 1.0); }");
         GLuint fs = compile(GL_FRAGMENT_SHADER,
@@ -499,18 +505,27 @@ static void present(desp_replay* r, int sw, int sh, int outRect[4], float waitin
         glBufferData(GL_ARRAY_BUFFER, sizeof quad, quad, GL_STATIC_DRAW);
         glEnableVertexAttribArray(0);
         glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, 0);
+        glBindVertexArray((GLuint)prevVao);
+        glBindBuffer(GL_ARRAY_BUFFER, (GLuint)prevBuf);
     }
     // the game's state, restored afterwards
-    GLint vp[4], sb[4], tex = 0, unit = 0, vao = 0, abuf = 0, fb = 0;
+    GLint vp[4], sb[4], tex = 0, unit = 0, vao = 0, abuf = 0, fb = 0, bsrc = 0, bdst = 0, bsrcA = 0, bdstA = 0, beq = 0, beqA = 0;
     GLfloat cc[4];
     GLboolean cm[4];
     GLboolean blend = glIsEnabled(GL_BLEND), scissor = glIsEnabled(GL_SCISSOR_TEST);
+    GLboolean depth = glIsEnabled(GL_DEPTH_TEST), cull = glIsEnabled(GL_CULL_FACE);
     glGetIntegerv(GL_VIEWPORT, vp);
     glGetIntegerv(GL_SCISSOR_BOX, sb);
     glGetIntegerv(GL_FRAMEBUFFER_BINDING, &fb);
     glGetBooleanv(GL_COLOR_WRITEMASK, cm);
     glGetIntegerv(GL_ACTIVE_TEXTURE, &unit);
     glGetFloatv(GL_COLOR_CLEAR_VALUE, cc);
+    glGetIntegerv(GL_BLEND_SRC_RGB, &bsrc);
+    glGetIntegerv(GL_BLEND_DST_RGB, &bdst);
+    glGetIntegerv(GL_BLEND_SRC_ALPHA, &bsrcA);
+    glGetIntegerv(GL_BLEND_DST_ALPHA, &bdstA);
+    glGetIntegerv(GL_BLEND_EQUATION_RGB, &beq);
+    glGetIntegerv(GL_BLEND_EQUATION_ALPHA, &beqA);
     glActiveTexture(GL_TEXTURE0);
     glGetIntegerv(GL_TEXTURE_BINDING_2D, &tex);
     glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &vao);
@@ -518,27 +533,32 @@ static void present(desp_replay* r, int sw, int sh, int outRect[4], float waitin
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glDisable(GL_BLEND);
     glDisable(GL_SCISSOR_TEST);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     glViewport(0, 0, sw, sh);
     glClearColor(0, 0, 0, 1);
     glClear(GL_COLOR_BUFFER_BIT);
-    int rect[4] = {0, 0, sw, sh};
+    int full[4] = {0, 0, sw, sh};
+    if (!area) area = full;
+    int rect[4] = {0, 0, sw, sh}, pic[4] = {0, 0, sw, sh};
     if (r->fboTex && r->gameW > 0 && r->gameH > 0) {
-        if (r->hasView) {
-            // stretch the game's picture (not its black bars) over the whole screen: place the
-            // whole window so that the picture's part of it covers the screen exactly
-            float sx = (float)sw / r->view[2], sy = (float)sh / r->view[3];
-            rect[0] = (int)(-r->view[0] * sx);
-            rect[1] = (int)(-(r->gameH - r->view[1] - r->view[3]) * sy);
-            rect[2] = (int)(r->gameW * sx + 0.5f);
-            rect[3] = (int)(r->gameH * sy + 0.5f);
-        } else {
-            float s = (float)sw / r->gameW < (float)sh / r->gameH ? (float)sw / r->gameW : (float)sh / r->gameH;
-            rect[2] = (int)(r->gameW * s);
-            rect[3] = (int)(r->gameH * s);
-            rect[0] = (sw - rect[2]) / 2;
-            rect[1] = (sh - rect[3]) / 2;
-        }
+        // the part of the game's window that holds its picture (without the game's own bars)
+        int vx = 0, vy = 0, vw = r->gameW, vh = r->gameH;
+        if (r->hasView) { vx = r->view[0]; vy = r->view[1]; vw = r->view[2]; vh = r->view[3]; }
+        // fit it into the area, keeping its shape, centered
+        float s = (float)area[2] / vw < (float)area[3] / vh ? (float)area[2] / vw : (float)area[3] / vh;
+        pic[2] = (int)(vw * s + 0.5f);
+        pic[3] = (int)(vh * s + 0.5f);
+        pic[0] = area[0] + (area[2] - pic[2]) / 2;
+        pic[1] = area[1] + (area[3] - pic[3]) / 2;
+        // and place the whole window around it (its bars fall outside / are cut off)
+        rect[0] = pic[0] - (int)(vx * s + 0.5f);
+        rect[1] = pic[1] - (int)((r->gameH - vy - vh) * s + 0.5f);
+        rect[2] = (int)(r->gameW * s + 0.5f);
+        rect[3] = (int)(r->gameH * s + 0.5f);
+        glEnable(GL_SCISSOR_TEST);
+        glScissor(pic[0], pic[1], pic[2], pic[3]);
         glViewport(rect[0], rect[1], rect[2], rect[3]);
         glUseProgram(r->blitProg);
         glActiveTexture(GL_TEXTURE0);
@@ -546,6 +566,8 @@ static void present(desp_replay* r, int sw, int sh, int outRect[4], float waitin
         glBindVertexArray(r->blitVao);
         glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
         glBindVertexArray(0);
+        glDisable(GL_SCISSOR_TEST);
+        glViewport(0, 0, sw, sh);
     }
     if (waiting >= 0) {
         // a short bar sliding back and forth along the bottom of the screen
@@ -560,8 +582,11 @@ static void present(desp_replay* r, int sw, int sh, int outRect[4], float waitin
         glDisable(GL_SCISSOR_TEST);
     }
     if (outRect) memcpy(outRect, rect, sizeof rect);
+    if (picRect) memcpy(picRect, pic, sizeof pic);
+    if (overlay) overlay(ctx);
     glUseProgram(r->curProgram);
     glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)fb == 0 ? r->fbo : (GLuint)fb);
+    glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, (GLuint)tex);
     glActiveTexture((GLenum)unit);
     glBindVertexArray((GLuint)vao);
@@ -570,15 +595,32 @@ static void present(desp_replay* r, int sw, int sh, int outRect[4], float waitin
     glScissor(sb[0], sb[1], sb[2], sb[3]);
     glColorMask(cm[0], cm[1], cm[2], cm[3]);
     glClearColor(cc[0], cc[1], cc[2], cc[3]);
-    if (blend) glEnable(GL_BLEND);
-    if (scissor) glEnable(GL_SCISSOR_TEST);
+    glBlendFuncSeparate((GLenum)bsrc, (GLenum)bdst, (GLenum)bsrcA, (GLenum)bdstA);
+    glBlendEquationSeparate((GLenum)beq, (GLenum)beqA);
+    if (blend) glEnable(GL_BLEND); else glDisable(GL_BLEND);
+    if (scissor) glEnable(GL_SCISSOR_TEST); else glDisable(GL_SCISSOR_TEST);
+    if (depth) glEnable(GL_DEPTH_TEST);
+    if (cull) glEnable(GL_CULL_FACE);
 }
 
 void desp_replay_present(desp_replay* r, int sw, int sh, int outRect[4]) {
-    present(r, sw, sh, outRect, -1);
+    present(r, sw, sh, NULL, outRect, NULL, -1, NULL, NULL);
     sendMsg(r, OP_FRAME_DONE, NULL, 0);  // the game may draw the next one
 }
-void desp_replay_present_waiting(desp_replay* r, int sw, int sh, float seconds) { present(r, sw, sh, NULL, seconds); }
+void desp_replay_present_ex(desp_replay* r, int sw, int sh, const int area[4], int outRect[4], int picRect[4],
+                            void (*overlay)(void*), void* ctx) {
+    present(r, sw, sh, area, outRect, picRect, -1, overlay, ctx);
+    sendMsg(r, OP_FRAME_DONE, NULL, 0);
+}
+void desp_replay_present_waiting(desp_replay* r, int sw, int sh, float seconds) {
+    present(r, sw, sh, NULL, NULL, NULL, seconds, NULL, NULL);
+}
+
+void desp_replay_view(desp_replay* r, int view[7]) {
+    memcpy(view, r->view, sizeof r->view);
+    if (!r->hasView) { view[0] = view[1] = 0; view[2] = r->gameW; view[3] = r->gameH; view[4] = view[5] = view[6] = 0; }
+}
+unsigned desp_replay_game_texture(desp_replay* r) { return r->fboTex; }
 
 int desp_replay_read_frame(desp_replay* r, unsigned char* rgba) {
     if (!r->fbo || !r->haveFrame) return 0;

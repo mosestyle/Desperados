@@ -72,7 +72,9 @@ enum {
     OP_DEPTH_FUNC,         // u32 func
     OP_DEPTH_MASK,         // u8 flag
     OP_VIEW_RECT,          // i32 x y w h: where the game's picture is inside its window
-                           // (window pixels, top-left origin), without the game's own black bars
+                           // (window pixels, top-left origin), without the game's own black bars;
+                           // i32 picture width, height (the game's own units: 1920x1080 boot
+                           // menu, 1024x640 etc. in the game); i32 flags (VIEW_IN_MISSION)
 
     // app -> game
     OP_PIXELS = 100,       // pixel data for OP_READ_PIXELS
@@ -92,6 +94,8 @@ typedef struct {
 // IN_MOUSE_TO: put the game's cursor on (x, y) in game window pixels. The game only reads
 // relative mouse motion and keeps its own cursor (in the boot menu in 1920x1080 units, in the
 // game in window pixels); the game side converts.
+enum { VIEW_IN_MISSION = 1 };
+
 // IN_PAN: a finger dragged by (dx, dy) / 16 window pixels, now at (x, y): moves the camera in
 // a mission (the picture follows the finger); elsewhere it moves the cursor like IN_MOUSE_TO.
 enum { IN_MOUSE_MOTION = 1, IN_MOUSE_DOWN, IN_MOUSE_UP, IN_MOUSE_WHEEL, IN_KEY_DOWN, IN_KEY_UP, IN_QUIT, IN_MOUSE_TO, IN_PAN };
