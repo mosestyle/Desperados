@@ -19,6 +19,7 @@
 #include "protocol.h"
 
 #define E __attribute__((visibility("default")))
+#define TRACE_ONCE(name) do { static int done_; if (!done_) { done_ = 1; fprintf(stderr, "[bridge] %s called\n", name); } } while (0)
 typedef unsigned GLenum; typedef int GLint; typedef int GLsizei; typedef unsigned GLuint; typedef float GLfloat;
 typedef unsigned char GLubyte; typedef unsigned char GLboolean; typedef char GLchar; typedef intptr_t GLsizeiptr;
 typedef intptr_t GLintptr; typedef unsigned GLbitfield; typedef double GLdouble; typedef float GLclampf;
@@ -73,8 +74,27 @@ static void flushOut(void) {
 }
 
 // Starts a message; returns where its payload goes.
+static unsigned long opCount[128], msgTotal;
+static void noteOp(uint16_t op) {
+    if (msgTotal < 6) fprintf(stderr, "[bridge] command %lu: op %u\n", msgTotal + 1, op);
+    opCount[op & 127]++;
+    if (++msgTotal % (1u << 20) == 0) {  // a flood of commands without a frame: show which ones
+        fprintf(stderr, "[bridge] %lu commands so far; most frequent:", msgTotal);
+        for (int k = 0; k < 4; ++k) {
+            int best = 0;
+            for (int i = 1; i < 128; ++i) if (opCount[i] > opCount[best]) best = i;
+            if (!opCount[best]) break;
+            fprintf(stderr, " op %d x%lu", best, opCount[best]);
+            opCount[best] = 0;
+        }
+        fprintf(stderr, "\n");
+        memset(opCount, 0, sizeof opCount);
+    }
+}
+
 static uint8_t* msg(uint16_t op, size_t len) {
     connectBridge();
+    noteOp(op);
     if (outLen + sizeof(desp_msg_header) + len > outCap) {
         flushOut();
         if (sizeof(desp_msg_header) + len > outCap) {  // huge payload: grow the buffer
@@ -587,12 +607,12 @@ static EGLContext eCurrent;
 static int winW = 1024, winH = 768;
 static int winWidth(void) { return winW; }
 static int winHeight(void) { return winH; }
-E EGLDisplay eglGetDisplay(void* n) { (void)n; return &eDpy; }
-E EGLDisplay eglGetPlatformDisplay(EGLenum p, void* n, const intptr_t* a) { (void)p; (void)n; (void)a; return &eDpy; }
-E EGLDisplay eglGetPlatformDisplayEXT(EGLenum p, void* n, const EGLint* a) { (void)p; (void)n; (void)a; return &eDpy; }
-E EGLBoolean eglInitialize(EGLDisplay d, EGLint* ma, EGLint* mi) { (void)d; if (ma) *ma = 1; if (mi) *mi = 5; return 1; }
+E EGLDisplay eglGetDisplay(void* n) { TRACE_ONCE("eglGetDisplay"); (void)n; return &eDpy; }
+E EGLDisplay eglGetPlatformDisplay(EGLenum p, void* n, const intptr_t* a) { TRACE_ONCE("eglGetPlatformDisplay"); (void)p; (void)n; (void)a; return &eDpy; }
+E EGLDisplay eglGetPlatformDisplayEXT(EGLenum p, void* n, const EGLint* a) { TRACE_ONCE("eglGetPlatformDisplayEXT"); (void)p; (void)n; (void)a; return &eDpy; }
+E EGLBoolean eglInitialize(EGLDisplay d, EGLint* ma, EGLint* mi) { TRACE_ONCE("eglInitialize"); (void)d; if (ma) *ma = 1; if (mi) *mi = 5; return 1; }
 E EGLBoolean eglTerminate(EGLDisplay d) { (void)d; return 1; }
-E EGLBoolean eglBindAPI(EGLenum a) { (void)a; return 1; }
+E EGLBoolean eglBindAPI(EGLenum a) { TRACE_ONCE("eglBindAPI"); (void)a; return 1; }
 E EGLenum eglQueryAPI(void) { return 0x30A2; }
 E EGLint eglGetError(void) { return 0x3000; }
 static const char* eglExtensions =
@@ -600,11 +620,11 @@ static const char* eglExtensions =
     "EGL_EXT_device_enumeration EGL_EXT_device_query EGL_KHR_create_context EGL_KHR_surfaceless_context";
 E const char* eglQueryString(EGLDisplay d, EGLint n) { (void)d; return n == 0x3055 ? eglExtensions : n == 0x308D ? "OpenGL OpenGL_ES" : n == 0x3053 ? "Desperados" : "1.5 Desperados bridge"; }
 static int eDevice = 1;
-E EGLBoolean eglQueryDevicesEXT(EGLint max, void** devices, EGLint* num) { if (devices && max > 0) devices[0] = &eDevice; *num = 1; return 1; }
+E EGLBoolean eglQueryDevicesEXT(EGLint max, void** devices, EGLint* num) { TRACE_ONCE("eglQueryDevicesEXT"); if (devices && max > 0) devices[0] = &eDevice; *num = 1; return 1; }
 E const char* eglQueryDeviceStringEXT(void* dev, EGLint name) { (void)dev; (void)name; return ""; }
 E EGLBoolean eglQueryDeviceAttribEXT(void* dev, EGLint a, intptr_t* v) { (void)dev; (void)a; *v = 0; return 0; }
 E EGLBoolean eglGetConfigs(EGLDisplay d, EGLConfig* c, EGLint s, EGLint* n) { (void)d; if (c && s > 0) c[0] = &eCfg; *n = 1; return 1; }
-E EGLBoolean eglChooseConfig(EGLDisplay d, const EGLint* a, EGLConfig* c, EGLint s, EGLint* n) { (void)d; (void)a; if (c && s > 0) c[0] = &eCfg; *n = 1; return 1; }
+E EGLBoolean eglChooseConfig(EGLDisplay d, const EGLint* a, EGLConfig* c, EGLint s, EGLint* n) { TRACE_ONCE("eglChooseConfig"); (void)d; (void)a; if (c && s > 0) c[0] = &eCfg; *n = 1; return 1; }
 E EGLBoolean eglGetConfigAttrib(EGLDisplay d, EGLConfig c, EGLint a, EGLint* v) {
     (void)d; (void)c;
     switch (a) {
@@ -619,9 +639,9 @@ E EGLBoolean eglGetConfigAttrib(EGLDisplay d, EGLConfig c, EGLint a, EGLint* v) 
     }
     return 1;
 }
-E EGLContext eglCreateContext(EGLDisplay d, EGLConfig c, EGLContext s, const EGLint* a) { (void)d; (void)c; (void)s; (void)a; return &eCtx; }
+E EGLContext eglCreateContext(EGLDisplay d, EGLConfig c, EGLContext s, const EGLint* a) { TRACE_ONCE("eglCreateContext"); (void)d; (void)c; (void)s; (void)a; return &eCtx; }
 E EGLBoolean eglDestroyContext(EGLDisplay d, EGLContext c) { (void)d; (void)c; return 1; }
-E EGLSurface eglCreatePbufferSurface(EGLDisplay d, EGLConfig c, const EGLint* a) {
+E EGLSurface eglCreatePbufferSurface(EGLDisplay d, EGLConfig c, const EGLint* a) { TRACE_ONCE("eglCreatePbufferSurface");
     (void)d; (void)c;
     for (const EGLint* p = a; p && *p != 0x3038; p += 2) {
         if (p[0] == 0x3057) winW = p[1];
@@ -631,7 +651,7 @@ E EGLSurface eglCreatePbufferSurface(EGLDisplay d, EGLConfig c, const EGLint* a)
 }
 E EGLSurface eglCreateWindowSurface(EGLDisplay d, EGLConfig c, void* w, const EGLint* a) { (void)d; (void)c; (void)w; (void)a; return &eSurf; }
 E EGLBoolean eglDestroySurface(EGLDisplay d, EGLSurface s) { (void)d; (void)s; return 1; }
-E EGLBoolean eglMakeCurrent(EGLDisplay d, EGLSurface r, EGLSurface w, EGLContext c) {
+E EGLBoolean eglMakeCurrent(EGLDisplay d, EGLSurface r, EGLSurface w, EGLContext c) { TRACE_ONCE("eglMakeCurrent");
     (void)d; (void)r; (void)w;
     static int helloSent;
     if (c && !helloSent) {  // first context: tell the app who we are and how big we draw
@@ -647,7 +667,7 @@ E EGLBoolean eglMakeCurrent(EGLDisplay d, EGLSurface r, EGLSurface w, EGLContext
 E EGLContext eglGetCurrentContext(void) { return eCurrent; }
 E EGLSurface eglGetCurrentSurface(EGLint r) { (void)r; return eCurrent ? &eSurf : 0; }
 E EGLDisplay eglGetCurrentDisplay(void) { return &eDpy; }
-E EGLBoolean eglSwapBuffers(EGLDisplay d, EGLSurface s) { (void)d; (void)s; desp_frame_end(); return 1; }
+E EGLBoolean eglSwapBuffers(EGLDisplay d, EGLSurface s) { TRACE_ONCE("eglSwapBuffers"); (void)d; (void)s; desp_frame_end(); return 1; }
 E EGLBoolean eglSwapInterval(EGLDisplay d, EGLint i) { (void)d; (void)i; return 1; }
 E EGLBoolean eglQuerySurface(EGLDisplay d, EGLSurface s, EGLint a, EGLint* v) { (void)d; (void)s; *v = a == 0x3057 ? winW : a == 0x3056 ? winH : 0; return 1; }
 E EGLBoolean eglReleaseThread(void) { return 1; }

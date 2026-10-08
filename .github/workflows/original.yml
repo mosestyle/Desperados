@@ -32,7 +32,7 @@ jobs:
       - name: ARM64 Linux cross compilers
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq gcc-aarch64-linux-gnu g++-aarch64-linux-gnu > /dev/null
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libgl-dev libegl-dev libgles-dev > /dev/null
 
       # ---- the game process: Box64 (glibc, Box32), SDL2 (offscreen video, pipe audio), bridge libGL ----
       - name: Cache Box64
@@ -73,13 +73,21 @@ jobs:
       - name: Build the game process's SDL2
         run: |
           python3 android-box/child/patch_child_sdl.py child-sdl
+          # SDL only builds its desktop-OpenGL (EGL) support when it finds the GL/EGL headers; the
+          # cross compiler has none, and without it the game never gets a real GL context (it then
+          # draws forever without ever finishing a frame). The headers are architecture-independent.
+          mkdir -p cross-inc && cp -r /usr/include/GL /usr/include/EGL /usr/include/KHR /usr/include/GLES2 /usr/include/GLES3 cross-inc/
           cmake -S child-sdl -B build-child-sdl -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc -DCMAKE_SYSTEM_NAME=Linux \
+            "-DCMAKE_C_FLAGS=-I$GITHUB_WORKSPACE/cross-inc" \
             -DCMAKE_SYSTEM_PROCESSOR=aarch64 -DCMAKE_BUILD_TYPE=Release -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TEST=OFF \
             -DSDL_X11=OFF -DSDL_WAYLAND=OFF -DSDL_KMSDRM=OFF -DSDL_VULKAN=OFF -DSDL_OFFSCREEN=ON -DSDL_DUMMYVIDEO=ON \
             -DSDL_OPENGL=ON -DSDL_OPENGLES=ON -DSDL_PULSEAUDIO=OFF -DSDL_ALSA=OFF -DSDL_PIPEWIRE=OFF -DSDL_JACK=OFF \
             -DSDL_SNDIO=OFF -DSDL_OSS=OFF -DSDL_DISKAUDIO=ON -DSDL_DUMMYAUDIO=ON -DSDL_LIBUDEV=OFF -DSDL_DBUS=OFF \
             -DSDL_IBUS=OFF -DSDL_HIDAPI=OFF -DSDL_LIBSAMPLERATE=OFF > child-sdl.log 2>&1 || { tail -40 child-sdl.log; exit 1; }
           make -C build-child-sdl -j"$(nproc)" > child-sdl-build.log 2>&1 || { grep error child-sdl-build.log | head -40; exit 1; }
+          for d in SDL_VIDEO_OPENGL SDL_VIDEO_OPENGL_EGL SDL_VIDEO_DRIVER_OFFSCREEN SDL_AUDIO_DRIVER_DISK; do
+            grep -q "#define $d 1" build-child-sdl/include-config-release/SDL2/SDL_config.h || { echo "::error::game-side SDL built without $d"; exit 1; }
+          done
 
       - name: Build the bridge libGL / libEGL
         run: |
