@@ -31,6 +31,9 @@ void desp_replay_view(desp_replay* r, int view[7]);
 // The texture holding the game's window (rows bottom-up), 0 before the game started drawing.
 unsigned desp_replay_game_texture(desp_replay* r);
 
+// Copies a part of the game's window (window pixels, top-left origin) as RGBA, rows top-down.
+int desp_replay_read_window(desp_replay* r, int x, int y, int w, int h, unsigned char* rgba);
+
 // While waiting for the game's first picture: the same, plus a moving bar near the bottom of
 // the screen so it's clear the app is working. `seconds`: time since the game was started.
 void desp_replay_present_waiting(desp_replay* r, int screenW, int screenH, float seconds);

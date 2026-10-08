@@ -622,6 +622,29 @@ void desp_replay_view(desp_replay* r, int view[7]) {
 }
 unsigned desp_replay_game_texture(desp_replay* r) { return r->fboTex; }
 
+int desp_replay_read_window(desp_replay* r, int x, int y, int w, int h, unsigned char* rgba) {
+    if (!r->fbo || w <= 0 || h <= 0) return 0;
+    if (x < 0 || y < 0 || x + w > r->gameW || y + h > r->gameH) return 0;
+    GLint prevRead = 0, packAlign = 4;
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prevRead);
+    glGetIntegerv(GL_PACK_ALIGNMENT, &packAlign);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, r->fbo);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(x, r->gameH - y - h, w, h, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)prevRead);
+    glPixelStorei(GL_PACK_ALIGNMENT, packAlign);
+    // rows came bottom-up: flip to top-down
+    size_t row = (size_t)w * 4;
+    unsigned char* tmp = malloc(row);
+    for (int i = 0; i < h / 2; ++i) {
+        memcpy(tmp, rgba + i * row, row);
+        memcpy(rgba + i * row, rgba + (size_t)(h - 1 - i) * row, row);
+        memcpy(rgba + (size_t)(h - 1 - i) * row, tmp, row);
+    }
+    free(tmp);
+    return 1;
+}
+
 int desp_replay_read_frame(desp_replay* r, unsigned char* rgba) {
     if (!r->fbo || !r->haveFrame) return 0;
     GLint prev = 0;

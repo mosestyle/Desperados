@@ -31,6 +31,7 @@
 #include <unistd.h>
 
 #include "controls.h"
+#include "gameicons.h"
 #include "overlay.h"
 #include "replay.h"
 
@@ -166,8 +167,13 @@ static int audioThread(void* arg) {
     for (;;) {
         ssize_t r = read(fd, buf, sizeof buf);
         if (r <= 0 || leaving) break;
-        while (!leaving && SDL_GetQueuedAudioSize(audioDev) > target) SDL_Delay(2);
+        // wait while enough is queued, but never long: if the phone's output stops playing (e.g.
+        // the audio device is paused), keep the game going and drop the sound instead of
+        // making the game's sound thread wait for ever (the game waits for voices to finish)
+        Uint32 waitStart = SDL_GetTicks();
+        while (!leaving && SDL_GetQueuedAudioSize(audioDev) > target && SDL_GetTicks() - waitStart < 300) SDL_Delay(2);
         if (leaving) break;
+        if (SDL_GetQueuedAudioSize(audioDev) > target * 4) SDL_ClearQueuedAudio(audioDev);
         SDL_QueueAudio(audioDev, buf, (Uint32)r);
     }
     close(fd);
@@ -308,6 +314,7 @@ static int leave(int code) {
     if (audioDev) { SDL_CloseAudioDevice(audioDev); audioDev = 0; }
     if (replay) { desp_replay_destroy(replay); replay = NULL; }
     overlay_shutdown();
+    gameicons_free();
     desp_replay_set_logger(NULL);
     if (ctx) { SDL_GL_DeleteContext(ctx); ctx = NULL; }
     if (win) { SDL_DestroyWindow(win); win = NULL; }
@@ -365,6 +372,7 @@ int SDL_main(int argc, char* argv[]) {
     if (!ctx) { say("Desperados", SDL_GetError()); return leave(1); }
     SDL_GL_SetSwapInterval(1);
     logf_("GPU: %s, %s", (const char*)glGetString(GL_RENDERER), (const char*)glGetString(GL_VERSION));
+    logf_("the game's interface pictures: %d", gameicons_load(game));
     int sw, sh;
     SDL_GL_GetDrawableSize(win, &sw, &sh);
     // the game draws at the phone's aspect ratio, 768 pixels high
@@ -442,7 +450,7 @@ int SDL_main(int argc, char* argv[]) {
     controls_init(replay);
     int rect[4] = {0, 0, sw, sh}, pic[4] = {0, 0, sw, sh};
     int frames = 0, running = 1;
-    Uint32 started = SDL_GetTicks(), lastNote = started;
+    Uint32 started = SDL_GetTicks(), lastNote = started, lastFrameAt = started, lastStallNote = 0;
     while (running) {
         SDL_Event ev;
         while (SDL_PollEvent(&ev)) {
@@ -483,6 +491,13 @@ int SDL_main(int argc, char* argv[]) {
             break;
         }
         Uint32 now = SDL_GetTicks();
+        if (got > 0) lastFrameAt = now;
+        else if (frames > 0 && now - lastFrameAt > 5000 && now - lastStallNote > 10000) {
+            // the game stopped drawing: note what it's doing (for freezes in cutscenes etc.)
+            lastStallNote = now;
+            logf_("no picture from the game for %u s (after %d frames); its threads:", (now - lastFrameAt) / 1000, frames);
+            logGameThreads(gamePid);
+        }
         if (got > 0) {
             ++frames;
             int area[4];

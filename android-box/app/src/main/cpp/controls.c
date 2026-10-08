@@ -5,12 +5,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "gameicons.h"
 #include "overlay.h"
 
 // ---------------------------------------------------------------------------------------------
-// The buttons. Where the game has its own toolbar item, the button shows that item live (cut out
-// of the game's picture) and tapping it clicks that item; otherwise it presses the game's own
-// shortcut key (Options > Shortcuts, default set).
+// The buttons show the game's own pictures (from its interface file, see gameicons.h) where it
+// has one, and press the game's shortcut keys (Options > Shortcuts, default set). The right side
+// shows the selected character's actions: which ones is found by comparing the game's action
+// ring with the game's action pictures; tapping one clicks it on the ring (so two quick taps
+// are a double click: the gun reloads).
 
 // a place in the game's picture (1024 wide; y counted from the bottom when fromBottom, since
 // the bottom toolbar sits at the bottom whatever the picture height), measured from screenshots
@@ -20,40 +23,38 @@ typedef struct { float x, y, radius; int fromBottom; } spot_t;
 static const spot_t kRing[5] = {
     {119.3f, 18.3f, 18.5f, 0}, {108.3f, 54.3f, 18.5f, 0}, {86.7f, 87.3f, 18.5f, 0}, {55.0f, 111.0f, 18.5f, 0}, {19.3f, 122.7f, 18.5f, 0},
 };
-static const spot_t kStance = {12.0f, 29.0f, 17.0f, 1};      // bottom toolbar: the stance figure (crawl / stand up)
-static const spot_t kWatch = {52.5f, 24.0f, 21.0f, 1};       // bottom toolbar: the watch (quick action)
-static const spot_t kSpyglass = {950.0f, 37.0f, 30.0f, 1};   // bottom toolbar: the telescope (field of vision)
 
-typedef enum { B_KEY, B_RIGHTMODE, B_SPOT, B_SWAP } btype_t;
+typedef enum { B_NONE, B_KEY, B_RIGHTMODE, B_RING, B_SWAP } btype_t;
 typedef struct {
     btype_t type;
-    int icon;                // atlas icon, or -1 to show `spot` from the game's picture
-    const spot_t* spot;      // B_SPOT: what to click (and show); else what to show, if any
+    int icon;                // the app's own icon (atlas), used when there's no game picture
+    int gameId;              // the game's picture (BTTN id in default.res), 0 = none
+    int slot;                // B_RING: which circle of the action ring
     SDL_Scancode scancode;   // B_KEY
     SDL_Keycode key;
 } button_t;
 enum { ROWS = 6, PAGES = 2 };
 static const button_t kLeft[ROWS] = {
-    {B_RIGHTMODE, ICON_RIGHT, NULL, 0, 0},                          // the next tap is a right click
-    {B_SPOT, -1, &kStance, 0, 0},                                   // crawl / stand up
-    {B_KEY, -1, &kSpyglass, SDL_SCANCODE_LALT, SDLK_LALT},          // field of vision: then tap an enemy
-    {B_SPOT, -1, &kWatch, 0, 0},                                    // quick action
-    {B_KEY, ICON_ALL, NULL, SDL_SCANCODE_A, SDLK_a},                // select all
-    {B_KEY, -2, NULL, 0, 0},                                        // (empty)
+    {B_RIGHTMODE, ICON_RIGHT, 0, 0, 0, 0},                          // the next tap is a right click
+    {B_KEY, ICON_CROUCH, 51, 0, SDL_SCANCODE_C, SDLK_c},            // crawl
+    {B_KEY, ICON_STAND, 52, 0, SDL_SCANCODE_S, SDLK_s},             // stand up
+    {B_KEY, ICON_VIEW, 96, 0, SDL_SCANCODE_LALT, SDLK_LALT},        // field of vision: then tap an enemy
+    {B_KEY, ICON_PAUSE, 50, 0, SDL_SCANCODE_Q, SDLK_q},             // quick action (the watch)
+    {B_KEY, ICON_ALL, 0, 0, SDL_SCANCODE_A, SDLK_a},                // select all
 };
 static const button_t kRight[PAGES][ROWS] = {
-    {   // the character's actions
-        {B_SPOT, -1, &kRing[0], 0, 0}, {B_SPOT, -1, &kRing[1], 0, 0}, {B_SPOT, -1, &kRing[2], 0, 0},
-        {B_SPOT, -1, &kRing[3], 0, 0}, {B_SPOT, -1, &kRing[4], 0, 0},
-        {B_SWAP, ICON_SWAP, NULL, 0, 0},
+    {   // the selected character's actions, as on the action ring
+        {B_RING, -1, 0, 0, 0, 0}, {B_RING, -1, 0, 1, 0, 0}, {B_RING, -1, 0, 2, 0, 0},
+        {B_RING, -1, 0, 3, 0, 0}, {B_RING, -1, 0, 4, 0, 0},
+        {B_SWAP, ICON_SWAP, 0, 0, 0, 0},
     },
     {   // the game
-        {B_KEY, ICON_MENU, NULL, SDL_SCANCODE_ESCAPE, SDLK_ESCAPE},
-        {B_KEY, ICON_SAVE, NULL, SDL_SCANCODE_F5, SDLK_F5},
-        {B_KEY, ICON_LOAD, NULL, SDL_SCANCODE_F8, SDLK_F8},
-        {B_KEY, ICON_MAP, NULL, SDL_SCANCODE_M, SDLK_m},
-        {B_KEY, -2, NULL, 0, 0},
-        {B_SWAP, ICON_SWAP, NULL, 0, 0},
+        {B_KEY, ICON_MENU, 0, 0, SDL_SCANCODE_ESCAPE, SDLK_ESCAPE},
+        {B_KEY, ICON_SAVE, 0, 0, SDL_SCANCODE_F5, SDLK_F5},
+        {B_KEY, ICON_LOAD, 0, 0, SDL_SCANCODE_F8, SDLK_F8},
+        {B_KEY, ICON_MAP, 0, 0, SDL_SCANCODE_M, SDLK_m},
+        {B_NONE, -1, 0, 0, 0, 0},
+        {B_SWAP, ICON_SWAP, 0, 0, 0, 0},
     },
 };
 enum { BUTTONS = 2 * ROWS };
@@ -96,6 +97,8 @@ static struct {
     struct { SDL_Scancode sc; SDL_Keycode k; Uint32 at; } up[8];
     int stopTap;             // this touch only stopped a glide: no click
     int page;                // right side: 0 = actions, 1 = menu / save / load / map
+    int ringIcon[5], ringMiss[5];  // the action ring's pictures (BTTN id, -1 = unknown)
+    Uint32 ringAt;
 } c;
 
 static int forceMission;
@@ -106,6 +109,7 @@ void controls_init(desp_replay* r) {
     memset(&c, 0, sizeof c);
     c.r = r;
     c.wheelSel = -1;
+    for (int i = 0; i < 5; ++i) c.ringIcon[i] = -1;
     overlay_init();
 }
 
@@ -210,7 +214,7 @@ static int hitButton(float x, float y) {
     if (!inMission() || c.pic[0] < 40) return -1;
     float r = buttonRadius() * 1.2f;
     for (int i = 0; i < BUTTONS; ++i) {
-        if (buttonAt(i)->icon == -2) continue;  // empty place
+        if (buttonAt(i)->type == B_NONE) continue;  // empty place
         float bx, by;
         buttonCenter(i, &bx, &by);
         if ((x - bx) * (x - bx) + (y - by) * (y - by) <= r * r) return i;
@@ -236,24 +240,56 @@ static void clickSpot(const spot_t* p) {
     send(IN_MOUSE_DOWN, (int)wx, (int)wy, SDL_BUTTON_LEFT);
     send(IN_MOUSE_UP, (int)wx, (int)wy, SDL_BUTTON_LEFT);
 }
-// a round cut-out of the game's picture at `p`, drawn at (x, y) with radius r (GL coords)
-static void drawSpot(const spot_t* p, float x, float y, float r, float brightness) {
-    GLuint tex = (GLuint)desp_replay_game_texture(c.r);
-    int gw, gh;
-    desp_replay_game_size(c.r, &gw, &gh);
-    float wx, wy, wr;
-    if (!tex || gw <= 0 || gh <= 0 || !spotToWindow(p, &wx, &wy, &wr)) return;
-    float uv[4] = {(wx - wr) / gw, 1 - (wy + wr) / gh, (wx + wr) / gw, 1 - (wy - wr) / gh};
-    overlay_texture_disc(tex, uv, x, y, r, brightness);
-}
-
 static void pressButton(int i) {
     const button_t* b = buttonAt(i);
     switch (b->type) {
     case B_RIGHTMODE: c.rightNext = !c.rightNext; break;
     case B_SWAP: c.page = (c.page + 1) % PAGES; break;
-    case B_SPOT: clickSpot(b->spot); break;  // two quick taps = the game's double click (gun: reload)
+    case B_RING: clickSpot(&kRing[b->slot]); break;  // two quick taps = the game's double click (gun: reload)
     case B_KEY: key(b->scancode, b->key); break;
+    case B_NONE: break;
+    }
+}
+
+// Which pictures are on the action ring right now: compare its 5 circles (read back from the
+// game's picture) with the game's 40x40 action pictures in all their states.
+static void matchRing(void) {
+    float pw = (float)c.view[4];
+    if (pw <= 0 || c.view[2] <= 0) return;
+    float k = c.view[2] / pw;
+    int x0 = c.view[0], y0 = c.view[1], w = (int)(145 * k) + 2, h = (int)(145 * k) + 2;
+    static unsigned char* buf;
+    static int bufN;
+    if (bufN < w * h * 4) { free(buf); bufN = w * h * 4; buf = malloc((size_t)bufN); }
+    if (!buf || !desp_replay_read_window(c.r, x0, y0, w, h, buf)) return;
+    for (int slot = 0; slot < 5; ++slot) {
+        float best = 1e30f, second = 1e30f;
+        int bestId = -1;
+        for (int n = 0; n < gameicons_count(); ++n) {
+            const gameicon_t* g = gameicon_at(n);
+            if (memcmp(g->tag, "BTTN", 4) || g->w < 36 || g->w > 44 || g->h < 36 || g->h > 44) continue;
+            float icx = (g->w - 1) / 2.0f, icy = (g->h - 1) / 2.0f, ssd = 0;
+            int cnt = 0;
+            for (int dy = -13; dy <= 13; dy += 2)
+                for (int dx = -13; dx <= 13; dx += 2) {
+                    if (dx * dx + dy * dy > 169) continue;
+                    int ax = (int)lroundf(icx + dx), ay = (int)lroundf(icy + dy);
+                    const uint8_t* ip = g->rgba + ((size_t)ay * g->w + ax) * 4;
+                    if (!ip[3]) continue;
+                    int sx = (int)lroundf((kRing[slot].x + dx) * k), sy = (int)lroundf((kRing[slot].y + dy) * k);
+                    if (sx < 0 || sy < 0 || sx >= w || sy >= h) continue;
+                    const uint8_t* sp = buf + ((size_t)sy * w + sx) * 4;
+                    float dr = (float)sp[0] - ip[0], dg = (float)sp[1] - ip[1], db = (float)sp[2] - ip[2];
+                    ssd += dr * dr + dg * dg + db * db;
+                    ++cnt;
+                }
+            if (cnt < 40) continue;
+            ssd /= cnt;
+            if (ssd < best) { if (g->id != bestId) second = best; best = ssd; bestId = g->id; }
+            else if (ssd < second && g->id != bestId) second = ssd;
+        }
+        if (bestId >= 0 && best < 1500 && best < second * 0.9f) { c.ringIcon[slot] = bestId; c.ringMiss[slot] = 0; }
+        else if (++c.ringMiss[slot] >= 3) c.ringIcon[slot] = -1;
     }
 }
 
@@ -417,6 +453,10 @@ void controls_event(const SDL_Event* ev, int sw, int sh) {
 
 void controls_update(void) {
     Uint32 now = SDL_GetTicks();
+    if (inMission() && gameicons_count() && now - c.ringAt > 300) {
+        c.ringAt = now;
+        matchRing();
+    }
     // long press: the action wheel in a mission, a right click elsewhere
     if (c.role == ROLE_GAME && !c.dragged && !c.longDone && !c.wheel && now - c.downAt > 450) {
         c.longDone = 1;
@@ -454,6 +494,17 @@ static const float kLit[4] = {0.80f, 0.58f, 0.22f, 0.92f};
 static const float kEdge[4] = {0.93f, 0.85f, 0.65f, 0.9f};
 static const float kInk[4] = {1, 1, 1, 1};
 
+// a picture of the game fitted into a w x h box centered at (x, y) (GL coords)
+static int drawGameIcon(int id, int state, float x, float y, float w, float h) {
+    const gameicon_t* g = gameicon("BTTN", id, state);
+    if (!g) g = gameicon("BTTN", id, 0);
+    if (!g) return 0;
+    float s = w / g->w < h / g->h ? w / g->w : h / g->h;
+    float uv[4] = {g->uv[0], g->uv[3], g->uv[2], g->uv[1]};  // the atlas is top-down
+    overlay_texture(gameicons_texture(), uv, x, y, g->w * s, g->h * s, 1);
+    return 1;
+}
+
 void controls_draw(void* unused) {
     (void)unused;
     overlay_begin(c.sw, c.sh);
@@ -461,14 +512,24 @@ void controls_draw(void* unused) {
         float r = buttonRadius();
         for (int i = 0; i < BUTTONS; ++i) {
             const button_t* b = buttonAt(i);
-            if (b->icon == -2) continue;
+            if (b->type == B_NONE) continue;
             float x, y;
             buttonCenter(i, &x, &y);
-            int lit = (c.role == ROLE_BUTTON && c.button == i) || (b->type == B_RIGHTMODE && c.rightNext);
+            int pressed = c.role == ROLE_BUTTON && c.button == i;
+            int lit = pressed || (b->type == B_RIGHTMODE && c.rightNext);
             float gy = c.sh - y;
+            if (b->type == B_RING) {
+                // the action's own round picture fills the button
+                int id = c.ringIcon[b->slot];
+                if (id < 0 || !drawGameIcon(id, pressed ? 3 : 1, x, gy, 2 * r, 2 * r)) {
+                    overlay_disc(x, gy, r * 0.8f, kBack, 0);
+                    overlay_disc(x, gy, r * 0.8f, kEdge, 0.05f);
+                }
+                continue;
+            }
             overlay_disc(x, gy, r, lit ? kLit : kBack, 0);
-            if (b->icon >= 0) overlay_icon(b->icon, x, gy, r * 1.62f, kInk);
-            else if (b->spot) drawSpot(b->spot, x, gy, r * 0.9f, 1);
+            if (!(b->gameId && drawGameIcon(b->gameId, pressed ? 2 : 0, x, gy, r * 1.5f, r * 1.5f)))
+                overlay_icon(b->icon, x, gy, r * 1.62f, kInk);
             overlay_disc(x, gy, r, lit ? kLit : kEdge, 0.06f);
         }
     }
@@ -482,10 +543,12 @@ void controls_draw(void* unused) {
         for (int i = 0; i < 5; ++i) {
             float x, y;
             slotCenter(i, &x, &y);
-            float gy = c.sh - y, rr = i == c.wheelSel ? sr * 1.18f : sr;
-            overlay_disc(x, gy, rr * 1.08f, i == c.wheelSel ? kLit : kEdge, 0);
-            overlay_disc(x, gy, rr, kBack, 0);
-            drawSpot(&kRing[i], x, gy, rr, 1);  // the icon exactly as the game draws it on its ring
+            float gy = c.sh - y, rr = i == c.wheelSel ? sr * 1.2f : sr;
+            int id = c.ringIcon[i];
+            if (id < 0 || !drawGameIcon(id, i == c.wheelSel ? 2 : 1, x, gy, 2 * rr, 2 * rr)) {
+                overlay_disc(x, gy, rr, kBack, 0);
+                overlay_disc(x, gy, rr, kEdge, 0.05f);
+            }
         }
     }
 }

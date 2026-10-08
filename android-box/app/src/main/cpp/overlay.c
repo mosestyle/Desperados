@@ -167,3 +167,8 @@ void overlay_texture_disc(GLuint tex, const float uv[4], float cx, float cy, flo
     const float white[4] = {1, 1, 1, alpha};
     quad(cx - radius, cy - radius, 2 * radius, 2 * radius, uv, white, tex, radius, 0);
 }
+
+void overlay_texture(GLuint tex, const float uv[4], float cx, float cy, float w, float h, float alpha) {
+    const float white[4] = {1, 1, 1, alpha};
+    quad(cx - w / 2, cy - h / 2, w, h, uv, white, tex, 0, 0);
+}

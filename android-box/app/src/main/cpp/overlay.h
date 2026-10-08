@@ -20,5 +20,7 @@ void overlay_begin(int screenW, int screenH);
 void overlay_disc(float cx, float cy, float radius, const float rgba[4], float ring);
 // An icon from the atlas, centered at (cx, cy), size x size pixels, tinted by rgba.
 void overlay_icon(int icon, float cx, float cy, float size, const float rgba[4]);
+// A rectangle of a texture (e.g. a game icon in its atlas): uv = u0, v0 (bottom), u1, v1 (top).
+void overlay_texture(GLuint tex, const float uv[4], float cx, float cy, float w, float h, float alpha);
 // A round cut-out of a texture (e.g. the game's picture): uv = u0, v0 (bottom), u1, v1 (top).
 void overlay_texture_disc(GLuint tex, const float uv[4], float cx, float cy, float radius, float alpha);
