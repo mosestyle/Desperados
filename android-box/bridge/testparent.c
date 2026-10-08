@@ -113,6 +113,10 @@ int main(int argc, char** argv) {
                     desp_replay_send_input(r, &in);
                     mouse(r, IN_MOUSE_DOWN, x, y, 1);
                     mouse(r, IN_MOUSE_UP, x, y, 1);
+                } else if (sscanf(act, "to %d %d", &x, &y) == 2) {  // just put the cursor there
+                    desp_input in = {0};
+                    in.type = IN_MOUSE_TO; in.x = x; in.y = y;
+                    desp_replay_send_input(r, &in);
                 } else if (sscanf(act, "rclick %d %d", &x, &y) == 2) {
                     mouse(r, IN_MOUSE_MOTION, x, y, 0);
                     mouse(r, IN_MOUSE_DOWN, x, y, 3);

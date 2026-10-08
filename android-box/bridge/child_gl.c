@@ -167,7 +167,7 @@ typedef struct { uint32_t type, timestamp, windowID; uint8_t state, repeat, p2, 
 
 // Addresses of a few of the game's globals, from its symbol table (the Linux build keeps it):
 // in-process they are plain memory (Box64 maps the 32-bit program at its own addresses).
-static struct { int resolved; uintptr_t bootMode, bootX, bootY, winW, winH, gamePos; } gsym;
+static struct { int resolved; uintptr_t bootMode, bootX, bootY, winW, winH, gamePos, clipBox, mouseFactor; } gsym;
 
 static void resolveGameSymbols(void) {
     if (gsym.resolved) return;
@@ -208,6 +208,8 @@ static void resolveGameSymbols(void) {
             else if (!strcmp(n, "thqsdlfw_sdl_window_width")) gsym.winW = value;
             else if (!strcmp(n, "thqsdlfw_sdl_window_height")) gsym.winH = value;
             else if (!strcmp(n, "_ZN15SBThreadedInput14mpointPositionE")) gsym.gamePos = value;
+            else if (!strcmp(n, "_ZN15SBThreadedInput12mboxClippingE")) gsym.clipBox = value;
+            else if (!strcmp(n, "desperados_mouse_factor")) gsym.mouseFactor = value;
         }
         free(strs);
         free(syms);
@@ -225,20 +227,43 @@ static void pushMotion(int dx, int dy) {
     pushEvent(&ev);
 }
 
-// Cursor to (x, y) in window pixels: slam it into the top-left corner (the game clamps it),
-// then move by the target, converted to the boot menu's 1920x1080 units when needed.
+// Cursor to (x, y) in window pixels. The game only reads relative motion and keeps its own
+// cursor, so: slam it into the top-left corner (the game clamps it), then move it by the target.
+//  - boot menu: the cursor is in the 1920x1080 picture's units (fitted into the window)
+//  - the game: the cursor is in the game's own picture units (mboxClipping, e.g. 1024x640),
+//    which is drawn fitted into the window; each motion is multiplied by the mouse factor, and
+//    the game keeps moves in 16 bits, so the corner move must stay within +-32767.
 static void mouseTo(int x, int y) {
     resolveGameSymbols();
     int bootMode = gsym.bootMode ? *(volatile int32_t*)gsym.bootMode : 1;
     int w = gsym.winW ? *(volatile int32_t*)gsym.winW : winWidth(), h = gsym.winH ? *(volatile int32_t*)gsym.winH : winHeight();
+    if (w <= 0 || h <= 0) { w = winWidth(); h = winHeight(); }
     double tx = x, ty = y;
-    if (!bootMode && w > 0 && h > 0) {  // the boot menu: a 1920x1080 picture fitted into the window
+    if (!bootMode) {  // the boot menu: a 1920x1080 picture fitted into the window
         double s = (double)w / 1920 < (double)h / 1080 ? (double)w / 1920 : (double)h / 1080;
         tx = (x - (w - 1920 * s) / 2) / s;
         ty = (y - (h - 1080 * s) / 2) / s;
+        pushMotion(-30000, -30000);
+        pushMotion((int)(tx + 0.5), (int)(ty + 0.5));
+        return;
     }
-    pushMotion(-100000, -100000);
-    pushMotion((int)(tx + 0.5), (int)(ty + 0.5));
+    double gw = 0, gh = 0, factor = 1;
+    if (gsym.clipBox) {
+        const volatile float* c = (const volatile float*)gsym.clipBox;
+        gw = c[2] - c[0];
+        gh = c[3] - c[1];
+    }
+    if (gsym.mouseFactor) factor = *(const volatile float*)gsym.mouseFactor;
+    if (factor <= 0.01 || factor > 100) factor = 1;
+    if (gw < 1 || gh < 1) { gw = w; gh = h; }
+    double s = (double)w / gw < (double)h / gh ? (double)w / gw : (double)h / gh;
+    double gx = (x - (w - gw * s) / 2) / s, gy = (y - (h - gh * s) / 2) / s;
+    if (gx < 0) gx = 0;
+    if (gy < 0) gy = 0;
+    if (gx > gw - 1) gx = gw - 1;
+    if (gy > gh - 1) gy = gh - 1;
+    pushMotion(-30000, -30000);
+    pushMotion((int)(gx / factor + 0.5), (int)(gy / factor + 0.5));
 }
 
 static void deliverInput(const desp_input* in) {
