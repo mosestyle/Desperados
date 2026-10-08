@@ -79,6 +79,29 @@ static int copyAsset(const char* src, const char* dst) {
     return 1;
 }
 
+// Copy a file unless an identical-looking copy (same size, not older) is already there.
+static int copyFile(const char* src, const char* dst, mode_t mode) {
+    struct stat a, b;
+    if (stat(src, &a) != 0) { logf_("can't read %s: %s", src, strerror(errno)); return 0; }
+    if (stat(dst, &b) == 0 && b.st_size == a.st_size && b.st_mtime >= a.st_mtime) { chmod(dst, mode); return 1; }
+    FILE* in = fopen(src, "rb");
+    if (!in) { logf_("can't open %s: %s", src, strerror(errno)); return 0; }
+    char tmp[900];
+    snprintf(tmp, sizeof tmp, "%s.part", dst);
+    FILE* out = fopen(tmp, "wb");
+    if (!out) { logf_("can't write %s: %s", tmp, strerror(errno)); fclose(in); return 0; }
+    char buf[65536];
+    size_t got;
+    int ok = 1;
+    while ((got = fread(buf, 1, sizeof buf, in)) > 0)
+        if (fwrite(buf, 1, got, out) != got) { ok = 0; break; }
+    fclose(in);
+    if (fclose(out) != 0) ok = 0;
+    if (!ok || rename(tmp, dst) != 0) { logf_("copying %s failed", src); unlink(tmp); return 0; }
+    chmod(dst, mode);
+    return 1;
+}
+
 // glibc and our Linux libraries are packaged as lib*.so files; the game process finds them
 // under their real names through symlinks.
 static const char* kLinks[][2] = {
@@ -136,18 +159,17 @@ static int audioThread(void* arg) {
 
 // ---------------------------------------------------------------------------------------------
 
-static pid_t startGame(const char* game, const char* libDir, const char* linkDir, const char* x86Dir,
+static pid_t startGame(const char* game, const char* gameExe, const char* libDir, const char* linkDir, const char* x86Dir,
                        const char* fifo, const char* userDir, const char* rcFile, const char* runDir,
                        int sock, int logFd, int gw, int gh) {
     char ld[600], box[600], exe[600], ldPath[1200];
     snprintf(ld, sizeof ld, "%s/libglibc_ld.so", libDir);
     snprintf(box, sizeof box, "%s/libbox64g.so", libDir);
-    snprintf(exe, sizeof exe, "%s/desperados32", game);
+    snprintf(exe, sizeof exe, "%s", gameExe);
     snprintf(ldPath, sizeof ldPath, "%s", linkDir);
     char e[24][700];
     int n = 0;
     snprintf(e[n++], 700, "LD_LIBRARY_PATH=%s", linkDir);
-    snprintf(e[n++], 700, "LD_PRELOAD=%s/libchild_sigsys.so", libDir);  // see child/sigsys.c
     snprintf(e[n++], 700, "BOX64_LD_LIBRARY_PATH=%s", x86Dir);
     snprintf(e[n++], 700, "BOX64_LOG=1");
     snprintf(e[n++], 700, "BOX64_SHOWSEGV=1");
@@ -172,7 +194,9 @@ static pid_t startGame(const char* game, const char* libDir, const char* linkDir
     char* envp[25];
     for (int i = 0; i < n; ++i) envp[i] = e[i];
     envp[n] = NULL;
-    char* argv[] = {ld, "--library-path", ldPath, box, exe, NULL};
+    char guard[600];
+    snprintf(guard, sizeof guard, "%s/libchild_sigsys.so", libDir);  // see child/sigsys.c
+    char* argv[] = {ld, "--library-path", ldPath, "--preload", guard, box, exe, NULL};
 
     pid_t pid = fork();
     if (pid == 0) {
@@ -297,6 +321,12 @@ int SDL_main(int argc, char* argv[]) {
         snprintf(dst, sizeof dst, "%s/libgcc_s.so.1", x86Dir);
         copyAsset("x86lib/libgcc_s.so.1", dst);
     }
+    // Box64 only runs files marked executable, which nothing on the shared storage is: run a copy
+    // of the game's program from the app's own folder (the game still works in its own folder)
+    char gameExe[700], srcExe[700];
+    snprintf(srcExe, sizeof srcExe, "%s/desperados32", game);
+    snprintf(gameExe, sizeof gameExe, "%s/desperados32", files);
+    if (!copyFile(srcExe, gameExe, 0755)) { say("Desperados", "Couldn't copy desperados32 into the app."); return 1; }
     snprintf(rcFile, sizeof rcFile, "%s/box64.box64rc", files);
     {
         FILE* f = fopen(rcFile, "w");
@@ -311,7 +341,7 @@ int SDL_main(int argc, char* argv[]) {
     int sv[2];
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) { say("Desperados", "socketpair failed"); return 1; }
     logf_("starting the game process (libraries in %s)", libDir);
-    pid_t pid = startGame(game, libDir, linkDir, x86Dir, fifo, userDir, rcFile, files, sv[1], logFd, gw, gh);
+    pid_t pid = startGame(game, gameExe, libDir, linkDir, x86Dir, fifo, userDir, rcFile, files, sv[1], logFd, gw, gh);
     close(sv[1]);
     if (pid < 0) { say("Desperados", "Couldn't start the game process."); return 1; }
     SDL_CreateThread(audioThread, "audio", fifo);
