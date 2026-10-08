@@ -7,7 +7,7 @@ import sys
 from PIL import Image, ImageDraw, ImageFont
 
 S = 128
-ICONS = ["RIGHT", "CROUCH", "STAND", "VIEW", "ALL", "MENU", "SAVE", "LOAD", "PAUSE", "MAP"]
+ICONS = ["RIGHT", "CROUCH", "STAND", "VIEW", "ALL", "MENU", "SAVE", "LOAD", "PAUSE", "MAP", "SWAP"]
 INK = (244, 228, 190, 255)
 FONT = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 21)
 
@@ -73,6 +73,11 @@ def draw(name, d):
         d.polygon(pts, outline=INK, width=5)
         d.line((c - 14, 14, c - 14, 76), fill=INK, width=4)
         d.line((c + 14, 24, c + 14, 86), fill=INK, width=4)
+    elif name == "SWAP":  # two arrows going opposite ways
+        d.line((c - 30, 34, c + 22, 34), fill=INK, width=8)
+        d.polygon([(c + 18, 20), (c + 38, 34), (c + 18, 48)], fill=INK)
+        d.line((c - 22, 66, c + 30, 66), fill=INK, width=8)
+        d.polygon([(c - 18, 52), (c - 38, 66), (c - 18, 80)], fill=INK)
     w = d.textlength(name, font=FONT)
     d.text((c - w / 2, 96), name, font=FONT, fill=INK)
 
