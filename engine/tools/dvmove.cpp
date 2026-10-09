@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 
+#include "dv/DVArtificialIntelligence.h"
 #include "dv/DVElement.h"
 #include "dv/DVEngine.h"
 #include "dv/DVFastFindGrid.h"
@@ -113,6 +114,11 @@ int main(int argc, char** argv) {
     if (!engine.LoadStateFromFile(argv[2])) return 1;
     fprintf(stderr, "graph nodes %zu, half diagonals %zu\n", engine.PathFinder()->NodeCount(),
             engine.PathFinder()->HalfDiagonals().size());
+    if (getenv("DVLIST"))
+        for (DVElement* e : engine.Elements())
+            if (e->sprite)
+                fprintf(stderr, "elem %-10s %-24s %.0f,%.0f layer %u posture %u\n", e->KindName(), e->scriptName.c_str(),
+                        e->sprite->pos.posMap.x, e->sprite->pos.posMap.y, e->sprite->pos.layer, e->sprite->pos.posture);
     int hi = atoi(argv[6]);
     if (hi >= (int)engine.Heroes().size()) return 1;
     DVElementActor* h = engine.Heroes()[hi];
@@ -146,6 +152,7 @@ int main(int argc, char** argv) {
         if (t == crouchAt) engine.OrderCrouch();
         if (t % every == 0 && (every < 1000 || t == 0)) {
             engine.camera = (t == 0 && dest.x > 0 ? (pos.posMap + dest) * 0.5f : pos.posMap) - engine.screen * 0.5f;
+            if (getenv("DVCAM")) engine.camera = SBGeoPoint2D((float)atof(getenv("DVCAM")), (float)atof(strchr(getenv("DVCAM"), ',') + 1)) - engine.screen * 0.5f;
             engine.ClampCamera();
             snprintf(name, sizeof name, "%s%03d.ppm", argv[3], frame++);
             save(draw, engine, name, h, t == 0);
@@ -153,6 +160,13 @@ int main(int argc, char** argv) {
                     pos.posMap.y, pos.direction, pos.directionWanted, h->sprite->animation, h->sprite->entry, pos.posture,
                     h->orders.size());
         }
+        if (getenv("DVNPC") && t % atoi(getenv("DVNPC")) == 0)
+            for (DVElementActor* n : engine.NPCs())
+                if (n->ai)
+                    fprintf(stderr, "  t%d npc %-8s %6.0f,%-6.0f st %u/%#x role %u cmd %#x path %zu@%u view %u ang %.2f\n", t,
+                            n->KindName(), n->sprite->pos.posMap.x, n->sprite->pos.posMap.y, n->ai->state, n->ai->substate,
+                            n->ai->role, n->CurrentCommand(), n->ai->path.Count(), n->ai->path.current, n->view.status,
+                            n->view.angle);
         engine.PerformHourglass();
     }
     fprintf(stderr, "END %s %.1f,%.1f orders %zu goal %.1f,%.1f\n", h->KindName(), pos.posMap.x, pos.posMap.y, h->orders.size(),

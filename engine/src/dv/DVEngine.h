@@ -16,6 +16,7 @@ class DVElementActor;
 class DVFastFindGrid;
 class DVFrameHolder;
 class DVPathFinder;
+class DVHikingGuide;
 
 class DVEngine {
 public:
@@ -45,6 +46,10 @@ public:
     uint8_t nightPercent = 100;    // +0x1001
     uint16_t shadowKey = 0x1f;     // +0x1002 (the level's shadow colour)
     uint8_t weather = 0;           // +0x1004
+    uint32_t coneColors[3] = {0x00ff00, 0xffff00, 0xff0000};
+    float hearingFactor = 0.75f;   // mfHearingFactor
+    SBGeoVector2D MapSize() const { return SBGeoVector2D(mapW, mapH); }
+    const std::vector<DVElementActor*>& NPCs() const { return npcs; }
 
     std::string levelName;
     std::string backgroundName;
@@ -79,6 +84,8 @@ private:
     uint32_t background = 0;   // +0xba4
     uint32_t minimap = 0;      // +0xba8
     std::vector<DVElementActor*> heroes;
+    std::vector<DVElementActor*> npcs;      // +0xd88
+    std::unique_ptr<DVHikingGuide> hiking;  // +0xe10
     DVElementActor* selected = nullptr;
 
     int LoadMiscFromFile(SBFile& f);

@@ -6,7 +6,7 @@
 struct Camera {
     float x = 0, y = 0;            // top-left of the view on the map
     float viewH = 640;             // map pixels shown from top to bottom (zoom)
-    float minViewH = 360, maxViewH = 1100;
+    float minViewH = 200, maxViewH = 1100;   // 200 = as close as the first build
     float vx = 0, vy = 0;          // glide speed, map pixels per second
     bool dragging = false;
 

@@ -1,5 +1,10 @@
 #include "dv/DVElement.h"
 
+#include <cmath>
+#include <cstdlib>
+
+#include "dv/DVArtificialIntelligence.h"
+
 #include "dv/DVEngine.h"
 #include "dv/DVFastFindGrid.h"
 #include "dv/DVFrameHolder.h"
@@ -87,6 +92,11 @@ void DVElement::DrawSprite(uint32_t screen, float zoom, const SBGeoBoundingBox2D
 
 // ---- actors -------------------------------------------------------------------------------
 
+static bool s_HasAnim(DVSprite* s, uint32_t anim) { return s->HasAnimation(anim); }
+
+DVElementActor::DVElementActor() = default;
+DVElementActor::~DVElementActor() = default;
+
 // DVElementActorPC / NPC / Animal / Horse ::LoadStateFromFile (0x08241a70, 0x08234f20,
 // 0x082045e0, 0x082167f0)
 int DVElementActor::LoadStateFromFile(SBFile& f) {
@@ -99,27 +109,22 @@ int DVElementActor::LoadStateFromFile(SBFile& f) {
         return n + 4 + len;
     }
     if (kind == KIND_VILLAIN || kind == KIND_CIVILIAN) {
+        // DVElementActorNPC::LoadStateFromFile: the script's name, the brain's attributes
+        // (DVArtificialMalignity / Bonhomie::LoadAttributesFromFile), the route (DVPath) and the
+        // starting state
         scriptName = f.String16();
         int len = (int)scriptName.size();
-        // the AI attributes (DVArtificialMalignity / Bonhomie::LoadAttributesFromFile)
-        int ai;
-        if (kind == KIND_VILLAIN) {
-            profile = f.U32();
-            aiShort = f.U16();
-            aiAttitude = f.U8() & 0x7f;
-            aiByte = f.U8();
-            ai = 8;
-        } else {
-            aiValue = f.U32();
-            aiAttitude = f.U8() & 0x7f;
-            aiByte = f.U8();
-            ai = 6;
-        }
-        // DVPath::LoadFromFile: the patrol route
-        pathIndex = f.U16();
-        f.U16();  // (stored in the AI: +0x24)
+        if (kind == KIND_VILLAIN)
+            ai = std::make_unique<DVArtificialMalignity>(this);
+        else
+            ai = std::make_unique<DVArtificialBonhomie>(this);
+        int a = ai->LoadAttributesFromFile(f);
+        int p = ai->path.LoadFromFile(f);
+        ai->role = f.U16();
         MakeSurfaces(2, 2, true);
-        return ai + 2 + 4 + n + len;
+        // can walk and run (animations 3 and 5)
+        ai->canMove = s_HasAnim(sprite.get(), CMD_WALK) && s_HasAnim(sprite.get(), CMD_RUN);
+        return a + p + 4 + n + len;
     }
     if (kind == KIND_HORSE) {
         uint16_t len = f.U16();
@@ -351,22 +356,36 @@ void DVElementActor::MakeWalking() {
     newOrder = true;
 }
 
-// DVElementActor::Hourglass (0x0820b2e0) with the heroes' Execute (DVElementActorPC 0x08244e80,
+// DVElementActor::Hourglass (0x0820b2e0) with the Execute functions (DVElementActorPC 0x08244e80,
 // DVElementActorHuman 0x0821e420, DVElementActor 0x0820da70) for the commands of this step
 void DVElementActor::Hourglass() {
     if (selectionPulse > 0) --selectionPulse;
-    if (!IsHero() || !active) return;
+    if (!active) return;
+    if (IsNPC()) {
+        NPCHourglass();
+        return;
+    }
+    if (!IsHero()) return;
+    StepOrders();
+}
+
+// one step of the current orders; true when the last one just ended
+bool DVElementActor::StepOrders() {
     DVSprite* s = sprite.get();
     DVPositionInterface& pos = s->pos;
     if (orders.empty()) {
         if (defaultCommand == CMD_NONE) SetDefaultWaitAction();
         if (defaultCommand == CMD_LYING) {
             s->PerformAction(0, CMD_LYING, 0xb, false);
+        } else if (defaultCommand != CMD_WAIT && s->HasAnimation(defaultCommand)) {
+            // DVElementActor::SetInitialAnimation's idle animations (sitting, sleeping, ...)
+            s->PerformAction(0, defaultCommand, 0xc, false);
         } else {
             int r = s->PerformAction(0, CMD_WAIT, 4, false);
             if (r == 1) SetStates(POSTURE_STANDING, 0);
         }
-        return;
+        s->displayOrder = pos.pos3D.y;
+        return false;
     }
     DVOrder& o = orders.front();
     bool first = newOrder;
@@ -410,13 +429,426 @@ void DVElementActor::Hourglass() {
         if (r == 1) SetStates(POSTURE_GETTING_UP, 0);
         else if (r == 3) SetStates(POSTURE_STANDING, 0);
         break;
+    case CMD_TURN:
+        // DVElementActor::Translate 0x1d sets the wanted direction; Execute 0xe0 turns two
+        // sixteenths a tick, stepping on the spot (the walk animation)
+        if (first) {
+            pos.directionWanted = o.direction & 0xf;
+            if (pos.direction == pos.directionWanted) {
+                r = 3;
+                break;
+            }
+        }
+        if (pos.posture != POSTURE_STANDING) {
+            pos.direction = pos.directionWanted;
+            r = 3;
+            break;
+        }
+        {
+            bool turning = pos.TurnFast();
+            if (first) {
+                s->PerformAction(o.id, CMD_WAIT, 0xb, false);
+                r = 1;
+            } else {
+                s->PerformAction(o.id, CMD_WALK, 0, false);
+                r = turning ? 2 : 3;
+            }
+        }
+        break;
     }
+    bool ended = false;
     if (r == 3 || r == 4) {
         orders.pop_front();
         newOrder = true;
-        if (orders.empty()) defaultCommand = CMD_NONE;
+        if (orders.empty()) {
+            defaultCommand = IsNPC() ? CMD_WAIT : CMD_NONE;
+            ended = true;
+        }
     }
     s->displayOrder = pos.pos3D.y;
+    return ended;
+}
+
+// ---- the NPCs --------------------------------------------------------------------------------
+
+uint32_t DVElementActor::CurrentCommand() const {
+    if (!orders.empty()) return orders.front().command;
+    return defaultCommand == CMD_NONE ? CMD_WAIT : defaultCommand;
+}
+
+// DVSequenceManager::LaunchSequence for one actor: the orders replace the current ones
+void DVElementActor::Launch(const std::deque<DVOrder>& seq, bool move) {
+    orders = seq;
+    newOrder = true;
+    isMove = move;
+}
+
+// DVElementActorNPC::Halt
+void DVElementActor::Halt() {
+    if (ai) ai->halting = true;
+    uint32_t c = CurrentCommand();
+    if (c - 0x43u > 1) {
+        orders.clear();
+        newOrder = true;
+        if (ai) ai->halted = false;
+    }
+    if (ai) ai->halting = false;
+}
+
+// DVElementActorNPC::StoreInitialPositionParameters: its post (place and direction)
+void DVElementActor::StoreInitialPositionParameters() {
+    DVPositionInterface& pos = sprite->pos;
+    homeDir = SBSetSector0to15(pos.direction, 1.0f);
+    home.p = pos.posMap;
+    home.layer = (int16_t)pos.layer;
+    home.sector = pos.sector;
+}
+
+void DVElementActor::LaunchTimer(uint32_t frames, bool macro) {
+    if (!ai) return;
+    uint32_t now = *DVArtificialIntelligence::mpUniversalFrameCounter;
+    if (macro) {
+        ai->macroTimerAt = frames + now;
+        ai->macroTimerOn = true;
+        return;
+    }
+    ai->timerSubstate = ai->substate;
+    ai->timerAt = frames + now;
+    ai->timerOn = true;
+}
+
+void DVElementActor::KillTimer(bool macro) {
+    if (!ai) return;
+    if (macro)
+        ai->macroTimerOn = false;
+    else
+        ai->timerOn = false;
+}
+
+// DVElementActorNPC::SetViewStatus: while glancing, the status for afterwards
+void DVElementActor::SetViewStatus(uint8_t status, bool force) {
+    (void)force;
+    if (ai && ai->glanceOn) {
+        savedView.status = status;
+        return;
+    }
+    view.changed = view.status != status;
+    view.status = status;
+}
+
+// DVElementActorNPC::SetViewCone: the cone's shape and motion for each kind of watching
+void DVElementActor::SetViewCone(uint32_t cone) {
+    if (knockedOut || !ai) return;
+    ai->viewCone = cone;
+    DVviewParameters& v = view;
+    uint16_t R = DVArtificialIntelligence::muwStandardViewPolygonRadius;
+    int status = 2;  // the usual: sweeping
+    switch (cone) {
+    case 0:
+    case 1:
+        v.widthTarget = 0.5f; v.widthSpeed = 0.1f; v.radius = R; v.sweepAmplitude = 0.8f;
+        v.sweepSpeed = 0.0392f; v.u2ae = 0x9a; v.turnStep = 0.19635f;
+        break;
+    case 2:
+        v.widthTarget = 0.5f; v.widthSpeed = 0.1f; v.radius = R; v.sweepAmplitude = 0.8f;
+        v.sweepSpeed = 0.19635f; v.u2ae = 0x9a; v.turnStep = 0.19635f;
+        break;
+    case 3:
+        v.widthTarget = 0.8f; v.widthSpeed = 0.3f; v.radius = R; v.sweepAmplitude = 1.5f;
+        v.sweepSpeed = 0.3927f; v.angle = 0; v.u2ae = 0x9a; v.turnStep = 0.19635f;
+        break;
+    case 4:
+        v.widthTarget = 0.8f; v.widthSpeed = 0.3f; v.radius = R; v.angle = 0; v.u2ae = 0x9a; v.turnStep = 0.19635f;
+        status = -1;
+        break;
+    case 5:
+        v.widthTarget = 0.8f; v.widthSpeed = 0.1f; v.radius = R; v.sweepAmplitude = 1.5f;
+        v.sweepSpeed = 0.15708f; v.angle = 0; v.u2ae = 0x9a; v.turnStep = 0.19635f;
+        break;
+    case 6:
+        v.widthTarget = 0.5f; v.widthSpeed = 0.3f; v.radius = R; v.sweepAmplitude = 1.5f; v.u2ae = 0x9a;
+        v.turnStep = 0.19635f;
+        status = 1;
+        break;
+    case 7:
+        v.widthTarget = 0.5f; v.radius = 0x78; v.sweepAmplitude = 0.8f; v.sweepSpeed = 0.0392f; v.u2ae = 0x9a;
+        v.turnStep = 0.19635f;
+        status = -1;
+        break;
+    case 8:
+        v.widthTarget = 0.3f; v.widthSpeed = 0.1f; v.radius = R; v.sweepAmplitude = 1.5f; v.sweepSpeed = 0.0392f;
+        v.u2ae = 0x9a; v.turnStep = 0.7854f;
+        status = -1;
+        break;
+    case 10:
+        v.widthTarget = 0.3f; v.widthSpeed = 0.1f; v.radius = R; v.sweepAmplitude = 0.1f; v.sweepSpeed = 0.0157f;
+        v.u2ae = 0x9a; v.turnStep = 0.19635f;
+        break;
+    case 0xb:
+        v.widthTarget = 0.15f; v.widthSpeed = 0.1f;
+        if (v.radius < R) v.radius = R;
+        v.sweepAmplitude = 0.8f; v.sweepSpeed = 0.0392f; v.u2ae = 0x9a; v.turnStep = 0.7854f;
+        status = -1;
+        break;
+    case 0xc:
+        v.widthTarget = 0.22f; v.widthSpeed = 0.1f; v.radius = R; v.sweepAmplitude = 0.8f; v.sweepSpeed = 0.0392f;
+        v.u2ae = 0x9a; v.turnStep = 0.7854f;
+        status = -1;
+        break;
+    case 0xd:
+        v.widthTarget = 0.5f; v.widthSpeed = 0.1f; v.radius = (uint16_t)(int)((float)R * 0.6f); v.sweepAmplitude = 0.5f;
+        v.sweepSpeed = 0.0157f; v.u2ae = 0x9a; v.turnStep = 0.19635f;
+        break;
+    case 0xe:
+        v.widthTarget = 0.5f; v.widthSpeed = 0.1f; v.radius = R; v.sweepAmplitude = 0.8f; v.sweepSpeed = 0.00628f;
+        v.u2ae = 0x9a; v.turnStep = 0.19635f;
+        break;
+    case 0xf:
+        v.widthTarget = 0.15f; v.widthSpeed = 0.1f; v.radius = R; v.sweepAmplitude = 1.5f; v.f310 = 2.0f;
+        v.sweepSpeed = 0.00628f; v.u2ae = 0x9a; v.turnStep = 0.19635f;
+        break;
+    case 0x10:
+        v.widthTarget = 0.5f; v.widthSpeed = 0.1f; v.radius = R; v.sweepAmplitude = 0.5f; v.sweepSpeed = 0.00628f;
+        v.u2ae = 0x9a; v.turnStep = 0.19635f; v.f31c = 0.1f; v.f310 = 2.0f; v.b330 = true;
+        break;
+    case 0x11:
+        v.widthTarget = 0.5f; v.widthSpeed = 0.1f; v.radius = R; v.sweepAmplitude = 1.0f; v.sweepSpeed = 0.1047f;
+        v.u2ae = 0x9a; v.turnStep = 0.19635f;
+        break;
+    default:
+        status = -1;
+        break;
+    }
+    if (status >= 0) {
+        if (ai->glanceOn)
+            savedView.status = (uint8_t)status;
+        else {
+            v.changed = v.status != status;
+            v.status = (uint8_t)status;
+        }
+    }
+    v.widthMoving = true;
+    ai->viewCone = cone;
+}
+
+// DVElementActorNPC::GlanceAt: looks at a place for a while, then back to the usual view
+void DVElementActor::GlanceAt(const DVposition& p, uint32_t frames) {
+    if (!ai) return;
+    ai->glanceUntil = *DVArtificialIntelligence::mpUniversalFrameCounter + frames;
+    if (!ai->glanceOn) savedView = view;
+    view.target = p.p;
+    view.targetElement = nullptr;
+    view.changed = view.status != 9;
+    view.status = 9;
+    ai->glanceOn = true;
+}
+
+void DVElementActor::RestoreView() { view = savedView; }
+
+void DVElementActor::DontFixDirectionOnViewTarget() {
+    if (view.status == 5)
+        view.status = 4;
+    else if (view.status == 7)
+        view.status = 6;
+}
+
+// DVElementActorNPC::RefreshView: where the cone points this frame. The body's direction gives
+// the base; status 1 looks straight ahead, 2 sweeps from side to side (sine of a phase), 3 turns
+// round, 4-7 and 9 look at a target point
+void DVElementActor::RefreshView() {
+    DVviewParameters& v = view;
+    DVPositionInterface& pos = sprite->pos;
+    SBGeoVector2D body = SBSetSector0to15(pos.direction, 1.0f);
+    if (v.status != 8 && (knockedOut || actionState == 6 || pos.posture == 0xe)) v.status = 0;
+    uint16_t d = pos.direction;
+    if (d != lastDirection) {
+        // the body turned: the cone keeps looking where it was, up to a quarter turn
+        int steps = (int)(int8_t)((uint8_t)((d - lastDirection) * 1 + 7) & 0xf) - 7;
+        float a = (float)steps * -0.3926991f + v.angle;
+        if (a < -1.5707964f) a = -1.5707964f;
+        if (a > 1.5707964f) a = 1.5707964f;
+        v.angle = a;
+        v.changed = true;
+        lastDirection = d;
+    }
+    if (v.widthMoving) {
+        if (v.widthTarget <= v.width) {
+            v.width -= v.widthSpeed;
+            if (v.width < v.widthTarget) {
+                v.width = v.widthTarget;
+                v.widthMoving = false;
+            }
+        } else {
+            v.width += v.widthSpeed;
+            if (v.widthTarget < v.width) {
+                v.width = v.widthTarget;
+                v.widthMoving = false;
+            }
+        }
+    }
+    if (v.status == 0) return;
+    auto rotated = [](const SBGeoVector2D& b, float ang) {
+        float c = std::cos(ang), s = std::sin(ang);
+        return SBGeoVector2D(b.x * c - b.y * s, b.x * s + b.y * c);
+    };
+    switch (v.status) {
+    case 1:
+        // back to straight ahead, a step at a time
+        if (v.angle > 0.0f) {
+            if (v.turnStep < v.angle) {
+                v.angle -= v.turnStep;
+                v.dir = rotated(body, v.angle);
+                break;
+            }
+        } else if (v.angle < -v.turnStep) {
+            v.angle += v.turnStep;
+            v.dir = rotated(body, v.angle);
+            break;
+        }
+        v.angle = 0;
+        v.sweepPhase = 0;
+        v.dir = body;
+        v.changed = false;
+        break;
+    case 2: {
+        float sp = v.sweepSpeed * 1.0f;
+        float ph = v.sweepPhase + sp;
+        if (ph > 6.2831855f) ph -= 6.2831855f;
+        v.sweepPhase = ph;
+        v.angle = v.sweepAmplitude * std::sin(ph);
+        v.dir = rotated(body, v.angle);
+        break;
+    }
+    case 3: {
+        float a = v.turnStep + v.angle;
+        if (a > 6.2831855f) a -= 6.2831855f;
+        v.angle = a;
+        v.dir = rotated(body, v.angle);
+        break;
+    }
+    case 4:
+    case 5:
+    case 6:
+    case 7:
+    case 9: {
+        SBGeoVector2D to = v.target - pos.posMap;
+        if (SBMaxNorm(to) == 0.0f) to = body;
+        to.y *= 0.57357645f;
+        // turns the cone towards the target, at most a quarter turn from the body
+        float want = std::atan2(to.y, to.x) - std::atan2(body.y * 0.57357645f, body.x);
+        while (want > 3.14159265f) want -= 6.2831855f;
+        while (want < -3.14159265f) want += 6.2831855f;
+        float lim = v.status == 9 ? 1.5707964f : 3.14159265f;
+        if (want > lim) want = lim;
+        if (want < -lim) want = -lim;
+        if (want > v.angle + v.turnStep)
+            v.angle += v.turnStep;
+        else if (want < v.angle - v.turnStep)
+            v.angle -= v.turnStep;
+        else
+            v.angle = want;
+        v.dir = rotated(body, v.angle);
+        break;
+    }
+    default:
+        break;
+    }
+    // the eyes open: the cone grows to its length
+    if (v.opening < 1000) {
+        v.radiusNow = (uint16_t)((float)v.opening * 0.001f * (float)v.radius);
+        v.opening = (uint16_t)(v.opening + (v.opening < 0x96 ? 5 : 2));
+    } else {
+        v.radiusNow = v.radius;
+    }
+    v.halfWidth = v.width * v.f31c;
+    v.length = (uint16_t)((float)v.radiusNow * v.f310);
+    v.edgeL = rotated(v.dir, -v.halfWidth);
+    v.edgeL.y *= 0.57357645f;
+    v.edgeR = rotated(v.dir, v.halfWidth);
+    v.edgeR.y *= 0.57357645f;
+}
+
+// DVArtificialIntelligence::InitState: the starting state given by the level
+bool DVElementActor::InitState(DVArtificialIntelligence& a) {
+    a.riding = false;
+    auto timer = [&]() {
+        int r = (std::rand() & 0x7fff) % 0x46 + 0x1e;
+        LaunchTimer(r ? (uint32_t)r : 1u, false);
+    };
+    switch (a.role) {
+    case 0:
+        a.SetState(AI_NORMAL, SUB_AT_POST);
+        timer();
+        SetViewCone(0);
+        return true;
+    case 1:
+        a.SetState(AI_NORMAL, SUB_AT_POST);
+        timer();
+        defaultCommand = 1;   // SetInitialAnimation(1)
+        a.atPost = true;
+        return false;
+    case 2:
+        a.SetState(AI_NORMAL, SUB_AT_POST);
+        SetViewCone(1);
+        timer();
+        return true;
+    case 7:
+    case 0x75:
+        // a combat point or a horse to start on: they come with the fights
+        a.SetState(AI_NORMAL, SUB_AT_POST);
+        SetViewCone(0);
+        timer();
+        return true;
+    case 0x16:  // a prisoner
+        SetViewCone(0xa);
+        a.SetState(9, 0xd8);
+        return false;
+    case 0x1b:  // threatening someone
+        SetViewCone(0xa);
+        a.SetState(5, 0xc2);
+        return false;
+    case 0x1e:
+    case 0x1f:
+    case 0x20:
+        // knocked out at the start (DVElementActorNPC::SetConcussionOfTheBrain)
+        a.SetState(0, 2);
+        SetViewStatus(8, false);
+        CloseEyes();
+        defaultCommand = a.role == 0x20 ? 0x20 : 0xd3;
+        return false;
+    case 0x21:  // a body
+        a.SetState(0, 2);
+        CloseEyes();
+        defaultCommand = 0xd2;
+        SetStates(0xe, 0);
+        return false;
+    case 0x54:  // asleep
+        a.SetState(0, 1);
+        SetViewStatus(8, false);
+        CloseEyes();
+        defaultCommand = 0x54;
+        return false;
+    default:
+        SBError(false, "DVArtificialIntelligence.cpp", 0x136d, "Actor at (%f, %f): Initial action %u not supported by AI.",
+                sprite->pos.posMap.x, sprite->pos.posMap.y, a.role);
+        return false;
+    }
+}
+
+// DVElementActorNPC::Hourglass: the brain's timers and stimuli, the view, the orders; every 16
+// frames DVArtificialIntelligence::The16thFrame
+void DVElementActor::NPCHourglass() {
+    DVArtificialIntelligence* b = ai.get();
+    bool ended = StepOrders();
+    if (!b) return;
+    if (ended && isMove) {
+        isMove = false;
+        b->SequenceDone(true, false);
+    }
+    RefreshView();
+    uint32_t now = *DVArtificialIntelligence::mpUniversalFrameCounter;
+    if (sprite->pos.posture != 0xe && ((now - frameOffset) & 0xf) == 0) b->The16thFrame((uint8_t)(now - frameOffset));
+    b->Hourglass();
 }
 
 // ---- objects ------------------------------------------------------------------------------

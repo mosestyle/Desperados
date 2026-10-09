@@ -1,5 +1,8 @@
 #include "dv/DVEngine.h"
 
+#include "dv/DVArtificialIntelligence.h"
+#include "dv/DVHikingGuide.h"
+
 #include <algorithm>
 #include <cmath>
 
@@ -22,6 +25,7 @@ DVEngine::DVEngine(SBDrawManager* d) : draw(d) {
     grid.reset(new DVFastFindGrid());
     pathFinder.reset(new DVPathFinder());
     pathFinder->SetObstacles(grid.get());
+    hiking.reset(new DVHikingGuide());
     DVSector::ResetCounters();
 }
 
@@ -72,6 +76,7 @@ bool DVEngine::LoadStateFromFile(const std::string& name) {
         case 0x53474854: done = grid->LoadSightObstaclesFromFile(f); break;   // SGHT
         case 0x4d41534b: done = grid->LoadMaskFromFile(f); break;            // MASK
         case 0x454c454d: done = LoadElemFromFile(f); break;                 // ELEM
+        case 0x57415953: done = hiking->LoadAllPathesFromFile(f); break;     // WAYS
         default: break;  // the others come with the next steps
         }
         if (done >= 0 && (uint32_t)done != len)
@@ -96,6 +101,17 @@ bool DVEngine::LoadStateFromFile(const std::string& name) {
         camera = heroes[0]->sprite->pos.posMap - screen * 0.5f;
     }
     ClampCamera();
+    // the NPCs (DVEngine +0xd88) and their brains (DVArtificialIntelligence::InitAI, called by
+    // DVGame::GameLoop when the mission starts)
+    npcs.clear();
+    for (auto& e : ownElements)
+        if ((e->kind == KIND_VILLAIN || e->kind == KIND_CIVILIAN) && e->active) {
+            auto* a = static_cast<DVElementActor*>(e.get());
+            a->frameOffset = (uint8_t)npcs.size();
+            npcs.push_back(a);
+        }
+    for (DVElementActor* a : npcs)
+        if (a->ai) a->ai->InitOneAI();
     return background != 0;
 }
 
@@ -109,12 +125,17 @@ int DVEngine::LoadMiscFromFile(SBFile& f) {
     f.U8();             // +0x1d4
     f.S16();            // +0xb98 / 10
     f.S16();            // +0xb9c / 10
-    f.U32();            // NPC colours
-    f.U32();
-    f.U32();
+    // the view cones' colours (DVElementActorNPC::InitColors): calm, suspicious, alarmed
+    coneColors[0] = f.U32();
+    coneColors[1] = f.U32();
+    coneColors[2] = f.U32();
     f.U8();
-    f.U16();            // standard view polygon radius
-    f.F32();            // hearing factor
+    DVArtificialIntelligence::muwStandardViewPolygonRadius = f.U16();
+    hearingFactor = f.F32();
+    if (hearingFactor == 0.0f) {
+        SBError(false, "DVEngine.cpp", 0x673, "Hearing coeff imported as 0, forced to 0.75");
+        hearingFactor = 0.75f;
+    }
     night = f.U8() != 0;
     nightPercent = f.U8();
     uint32_t c = f.U32();
@@ -232,8 +253,10 @@ void DVEngine::ClampCamera() {
 
 // DVEngine::PerformHourglass (0x08272300), the part these steps have: every element's 25 Hz
 // step (heroes' orders, scenery animations), then the display order again
+void DVArtificialIntelligenceTick();
 void DVEngine::PerformHourglass() {
     ++ticks;
+    DVArtificialIntelligenceTick();
     for (DVElement* e : elements) e->Hourglass();
     SortForEngine();
 }
