@@ -15,6 +15,9 @@ class DVMask;
 class DVSector;
 class DVSightObstacle;
 class DVSectorMotionArea;
+class DVSectorBuilding;
+class DVDoor;
+class DVElementActor;
 struct DVLine;
 
 // a walkable area as the path finder sees it (DVmotionArea): its sector and its thin barriers
@@ -79,6 +82,26 @@ public:
     // the walkable area of `layer` under the point (nullptr if none)
     DVSectorMotionArea* FindMotionArea(uint16_t layer, const SBGeoPoint2D& p) const;
 
+    // ---- doors, lifts and buildings (Game/DVDoor.cpp) -------------------------------------------
+    // LIFT (DVFastFindGrid::LoadLiftsFromFile, 0x082afed0): the last layer's areas are stairs,
+    // ladders and walls, each with a door at its bottom and one at its top
+    int LoadLiftsFromFile(SBFile& f);
+    // BUIL (0x082b0010): the houses (their doors and who is inside) and the other doors (gates)
+    int LoadBuildingsFromFile(SBFile& f, const std::vector<DVElementActor*>& actors);
+    // GetSectorScreen (0x082acda0): what is under a point of the map, from the top layer down: a
+    // walkable area (or a lift), or a door to a house. Returns false for nothing walkable.
+    bool GetSectorScreen(const SBGeoPoint2D& p, DVSectorMotionArea*& area, uint16_t& layer, DVDoor*& door) const;
+    // FindPathDoors (0x082c0cb0): the doors to go through from one area to another, with the
+    // way each is passed (true = from its first side to its second); false if there is no way
+    bool FindPathDoors(const DVElementActor* who, const SBGeoPoint2D& from, DVSectorMotionArea* fromArea,
+                       const SBGeoPoint2D& to, DVSectorMotionArea* toArea,
+                       std::vector<std::pair<DVDoor*, bool>>& out) const;
+    const std::vector<std::unique_ptr<DVDoor>>& Doors() const { return doors; }
+    const std::vector<DVSectorBuilding*>& Buildings() const { return buildings; }
+    DVDoor* NearestDoor(const SBGeoPoint2D& p, float maxDist) const;
+    void AddLayerSector(DVSector* s, uint16_t layer);
+    void AdoptSector(DVSector* s);  // the grid owns it, and lists it by its number
+
     uint16_t gridW = 0, gridH = 0;    // +0x18, +0x1a
     SBGeoBoundingBox2D box;           // +4
     uint16_t layerCount = 0;          // +0x1c
@@ -98,6 +121,9 @@ private:
     std::vector<std::unique_ptr<DVLine>> ownLines;
     std::vector<DVSightObstacle*> viewAreas;       // +0x190
     std::vector<DVSector*> sectors;                // +0x1ac
+    std::vector<std::vector<DVSector*>> layerSectors;  // what can be clicked on, per layer
+    std::vector<std::unique_ptr<DVDoor>> doors;    // +0x1c8
+    std::vector<DVSectorBuilding*> buildings;      // +0x200
     // ownership
     std::vector<std::unique_ptr<DVSector>> ownSectors;
     std::vector<std::unique_ptr<DVSightObstacle>> ownObstacles;

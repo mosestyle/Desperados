@@ -115,6 +115,13 @@ void Overlay::Picture(GLuint tex, int texW, int texH, float x, float y, float w,
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 }
 
+void Overlay::Tex(GLuint tex, float u0, float v0, float u1, float v1, float x, float y, float w, float h, float r,
+                  float g, float b, float a) {
+    const float uv[4] = {u0, v0, u1 - u0, v1 - v0};
+    const float c[4] = {r, g, b, a};
+    Quad(tex, x, y, w, h, uv, c);
+}
+
 void Overlay::Rect(float x, float y, float w, float h, float r, float g, float b, float a) {
     const float uv[4] = {0, 0, 1, 1};
     const float c[4] = {r, g, b, a};

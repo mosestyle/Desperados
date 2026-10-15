@@ -7,6 +7,7 @@
 #include "dv/DVElement.h"
 #include "dv/DVEngine.h"
 #include "dv/DVFastFindGrid.h"
+#include "dv/DVScript.h"
 #include "dv/DVSector.h"
 #include "dv/DVSprite.h"
 #include "sb/SBFile.h"
@@ -15,6 +16,7 @@ static uint32_t gFrameCounter = 0;
 uint32_t* DVArtificialIntelligence::mpUniversalFrameCounter = &gFrameCounter;
 uint16_t DVArtificialIntelligence::muwStandardViewPolygonRadius = 300;
 static uint8_t msbThinkMethodRecursionDepth = 0;
+bool DVArtificialIntelligence::mbFreeze = false;
 
 static uint32_t Now() { return *DVArtificialIntelligence::mpUniversalFrameCounter; }
 // desprand (0x083b5610): the game's random numbers
@@ -42,6 +44,53 @@ void DVArtificialIntelligence::ScriptUnlockAI() {
     }
 }
 
+bool DVArtificialIntelligence::AssignNewPatrolPath(uint16_t idx) {
+    inMacro = false;
+    npc->KillTimer(true);
+    auto backToDuty = [&]() {
+        if (!locked && state - 1u < 2) {
+            DVStimulus s = DVStimulus::Of(STIM_RETURN_TO_DUTY);
+            Think(s);
+        }
+    };
+    if (idx == 0xffff || idx == 0xfffe) {
+        onRoute = false;
+        path = DVPath();
+        npc->StoreInitialPositionParameters();
+        atPost = idx == 0xfffe;
+        backToDuty();
+        return true;
+    }
+    const DVWaypointList* w = DVHikingGuide::mpInstance ? DVHikingGuide::mpInstance->Path(idx) : nullptr;
+    if (!w) {
+        SBError(false, "DVArtificialIntelligence.cpp", 0x25d1, "Assigned illegal path on point (%f,%f) !",
+                npc->sprite->pos.posMap.x, npc->sprite->pos.posMap.y);
+        return false;
+    }
+    onRoute = true;
+    path = DVPath();
+    path.waypoints = w;
+    path.index = idx;
+    atPost = false;
+    backToDuty();
+    return true;
+}
+
+bool DVArtificialIntelligence::AssignNewPost(const DVposition& p, uint8_t dir) {
+    inMacro = false;
+    npc->KillTimer(true);
+    path = DVPath();
+    onRoute = false;
+    npc->home = p;
+    npc->homeDir = SBSetSector0to15(dir, 0.57357645f);
+    atPost = false;
+    if (!locked && state - 1u < 2) {
+        DVStimulus s = DVStimulus::Of(STIM_RETURN_TO_DUTY);
+        Think(s);
+    }
+    return true;
+}
+
 // the base SetState: the state and substate (each brain adds its own checks)
 void DVArtificialIntelligence::SetState(uint32_t s, uint32_t sub) {
     state = s;
@@ -62,6 +111,18 @@ DVposition DVArtificialIntelligence::Position() const {
 bool DVArtificialIntelligence::StartThink(DVStimulus& s) {
     uint32_t type = s.type;
     ++msbThinkMethodRecursionDepth;
+    // the NPC's script sees every stimulus first (IActorNPCScript::FilterEvent with the
+    // stimulus' event number, DAT_08558c80), even while it keeps the brain locked; 0 drops it
+    if (scripted && DVScript::mpInstance) {
+        static const int8_t kEvents[0x2e] = {0,  1,  2,  3,  4,  5,  6,  -2, 8,  -2, 10, 11, 12, 13, 14, 15,
+                                             16, 17, 18, 19, 20, -2, 22, 23, 24, 25, 26, 37, 40, 39, -2, 41,
+                                             9,  -1, -2, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 38};
+        int ev = type < 0x2e ? kEvents[type] : -2;
+        DVElement* src = nullptr;
+        if (s.source == 4 || (s.source == 3 && s.element && (s.element->classFlags & 3) == 3)) src = s.element;
+        if (!DVScript::mpInstance->FilterEvent(npc, src, ev)) return false;
+    }
+    if (mbFreeze) return false;
     // a brain the scripts locked: the stimuli wait (or are dropped) until it is unlocked
     if (locked) {
         if (lockKeep && type != STIM_REACHED && type != STIM_ACTION_DONE) queue.push_back(s);
@@ -413,7 +474,7 @@ bool DVArtificialIntelligence::GoNear(const DVposition& p, uint16_t dist, uint16
 // DVArtificialIntelligence::ExecuteWaypointScript: the waypoint's script (IWaypointScript::
 // ReachPoint) comes with the script engine; then "done" so that the walk goes on
 void DVArtificialIntelligence::ExecuteWaypointScript(DVWaypoint* w) {
-    (void)w;
+    if (DVScript::mpInstance) DVScript::mpInstance->ReachPoint(w, npc);
     if (substate != 0x95) {
         DVStimulus s = DVStimulus::Of(STIM_WAYPOINT_DONE);
         Think(s);
@@ -920,6 +981,8 @@ void DVArtificialMalignity::EventViewStandardProcedure(DVElement* e) {
 void DVArtificialMalignity::EventIdentifyStandardProcedure(DVElement* e) {
     BreakMacro();
     if (attitude != 4 && attitude != 2) return;
+    if (getenv("DVAILOG"))
+        SBLog("AI: %s #%d identifies %s #%d", npc->KindName(), DVScript::Handle(npc), e ? e->KindName() : "-", DVScript::Handle(e));
     SetAlertStatus(2, false);
     attitude = 4;
     target = e;
@@ -950,7 +1013,7 @@ static DVElementActor* AsActor(DVElement* e) { return dynamic_cast<DVElementActo
 void DVArtificialMalignity::Fight(bool first, bool b) {
     npc->KillTimer(false);
     DVElementActor* t = AsActor(target);
-    if (!t || t->dead || t->sprite->pos.posture == 0xe || !MyIsDetecting(t)) {
+    if (!t || t->dead || t->knockedOut || t->sprite->pos.posture == 0xe || !MyIsDetecting(t)) {
         GetBattleOverview(b);
         return;
     }
@@ -990,7 +1053,7 @@ void DVArtificialMalignity::BattleDecisions() {
     const auto& heroes = eng->Heroes();
     for (size_t i = 0; i < heroes.size() && i < detections.size(); ++i) {
         DVElementActor* h = heroes[i];
-        if (!detections[i] || h->dead) continue;
+        if (!detections[i] || h->dead || h->knockedOut) continue;
         SBGeoVector2D d = h->sprite->pos.posMap - pos.posMap;
         float dd = d.x * d.x + d.y * d.y * 3.04f;
         if (dd < bestD) {
@@ -1051,6 +1114,7 @@ void DVArtificialMalignity::EventGetBulletStandardProcedure(DVElement* shooter) 
     BreakMacro();
     attitude = 4;
     target = shooter;
+    if (getenv("DVAILOG")) SBLog("AI: %s #%d shot at by %s", npc->KindName(), DVScript::Handle(npc), shooter ? shooter->KindName() : "-");
     if (shooter && shooter->sprite) {
         lastKnown.p = shooter->sprite->pos.posMap;
         lastKnown.sector = shooter->sprite->pos.sector;
@@ -1201,6 +1265,7 @@ bool DVArtificialMalignity::Think(DVStimulus& s) {
                 lastKnown = f->lastKnown;
             }
             attitude = 4;
+            if (getenv("DVAILOG")) SBLog("AI: %s #%d joins his friend's fight", npc->KindName(), DVScript::Handle(npc));
             SetAlertStatus(2, false);
             searched = false;
             searchRounds = 0;

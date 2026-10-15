@@ -12,6 +12,8 @@ class SBPictureSixteen {
 public:
     bool LoadFromStream(SBFile& file);
     bool LoadFromFile(const std::string& gamePath);
+    // the same from bytes in memory; `used` = the bytes it took
+    bool LoadFromMemory(const uint8_t* p, size_t n, size_t& used);
     uint16_t GetWidth() const { return width; }
     uint16_t GetHeight() const { return height; }
     const std::vector<uint16_t>& Pixels() const { return pixels; }

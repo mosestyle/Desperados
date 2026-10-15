@@ -1,4 +1,6 @@
 #include "dv/DVElement.h"
+#include "dv/DVDoor.h"
+#include "dv/DVSector.h"
 
 #include "dv/DVArmsTrader.h"
 
@@ -221,8 +223,59 @@ std::vector<SBGeoPoint2D> DVElementActor::PlannedPath() const {
 // DVElementActor::Translate (0x08211170), command 0x17 "go there": straight there when the way is
 // free (DVFastFindGrid::IsReachableThick), else along the path finder's way (AddPathRequest,
 // DVPathFinder::FindPath, then DVEngine::ProcessPathRequests turns the points into orders)
+bool DVElementActor::BuildMoveInArea(const SBGeoPoint2D& start0, DVSectorMotionArea* area, uint16_t layer,
+                                     const SBGeoPoint2D& goal, uint32_t command, uint32_t movePosture, bool fromHere,
+                                     std::deque<DVOrder>& out) const {
+    DVSprite* s = sprite.get();
+    DVPositionInterface& pos = s->pos;
+    DVFastFindGrid* grid = s->grid;
+    if (!grid) return false;
+    auto add = [&](const SBGeoPoint2D& p) {
+        DVOrder o;
+        o.id = DVOrder::NewID();
+        o.command = command;
+        o.goal = p;
+        out.push_back(o);
+    };
+    SBGeoVector2D d = goal - start0;
+    if (std::fabs(d.x) < 0.5f && std::fabs(d.y) < 0.5f) return true;
+    SBGeoVector2D half = pos.GetMoveBox(movePosture).p1;
+    if (grid->IsReachableThick(start0, goal, layer, half)) {
+        add(goal);
+        return true;
+    }
+    // DVPathFinder::AddPathRequest (0x0832aa40): a start inside a wall is moved out first
+    SBGeoPoint2D start = start0;
+    bool adjusted = false;
+    {
+        SBGeoBoundingBox2D mb = fromHere ? pos.GetMoveBoxMap() : pos.GetMoveBox(movePosture) + start0;
+        if (!grid->IsPositionAutorized(mb, layer)) {
+            adjusted = true;
+            if (!grid->FindAutorizedPosition(mb, layer)) {
+                SBError(false, "DVPathFinder.cpp", 0x19c, "Actor in a wall at (%f,%f)", start0.x, start0.y);
+                return false;
+            }
+            start = SBCenter(mb);
+        }
+    }
+    if (!area) {
+        SBLog("%s is on no walkable area", KindName());
+        return false;
+    }
+    DVPathFinder* pf = DVEngine::mpEngine ? DVEngine::mpEngine->PathFinder() : nullptr;
+    if (!pf) return false;
+    std::vector<SBGeoPoint2D> path;
+    if (!pf->FindPath(layer, area->areaIndex, pos.GetPathFinderIndex(movePosture), start, goal, adjusted, path)) {
+        SBLog("no way from %.0f,%.0f to %.0f,%.0f (layer %u area %u size %u)", start.x, start.y, goal.x, goal.y, layer,
+              area->areaIndex, pos.GetPathFinderIndex(movePosture));
+        return false;
+    }
+    for (size_t i = adjusted ? 0 : 1; i < path.size(); ++i) add(path[i]);
+    return true;
+}
+
 bool DVElementActor::BuildMove(const SBGeoPoint2D& goal, uint32_t command, uint32_t movePosture,
-                               std::deque<DVOrder>& out) const {
+                               std::deque<DVOrder>& out, DVSectorMotionArea* goalArea) const {
     DVSprite* s = sprite.get();
     DVPositionInterface& pos = s->pos;
     DVFastFindGrid* grid = s->grid;
@@ -231,48 +284,65 @@ bool DVElementActor::BuildMove(const SBGeoPoint2D& goal, uint32_t command, uint3
         SBError(false, "DVElementActor.cpp", 0x9ad, "VERBOTEN: Actor trying to go to (0,0)!");
         return false;
     }
-    SBGeoVector2D half = pos.GetMoveBox(movePosture).p1;
-    if (grid->IsReachableThick(pos.posMap, goal, pos.layer, half)) {
+    DVSectorMotionArea* cur = Area();
+    if (!goalArea) {
+        // the area under the goal: his own if it is there, else one of his layer, else any
+        if (cur && !cur->IsBuilding() && cur->polygon.IsInside_p(goal)) goalArea = cur;
+        if (!goalArea && !cur) goalArea = grid->FindMotionArea(pos.layer, goal);
+        if (!goalArea && cur && !cur->IsBuilding()) goalArea = grid->FindMotionArea(pos.layer, goal);
+        if (!goalArea)
+            for (int l = (int)grid->layerCount - 2; l >= 0 && !goalArea; --l) goalArea = grid->FindMotionArea((uint16_t)l, goal);
+        if (!goalArea) goalArea = cur;
+    }
+    auto order = [&](uint32_t cmd, uint32_t anim, const SBGeoPoint2D& p, DVDoor* door, bool enter) {
         DVOrder o;
         o.id = DVOrder::NewID();
-        o.command = command;
-        o.goal = goal;
+        o.command = cmd;
+        o.anim = anim;
+        o.goal = p;
+        o.door = door;
+        o.enter = enter;
         out.push_back(o);
-        return true;
-    }
-    // DVPathFinder::AddPathRequest (0x0832aa40): a start inside a wall is moved out first
-    SBGeoPoint2D start = pos.posMap;
-    SBGeoBoundingBox2D mb = pos.GetMoveBoxMap();
-    bool adjusted = false;
-    if (!grid->IsPositionAutorized(mb, pos.layer)) {
-        adjusted = true;
-        if (!grid->FindAutorizedPosition(mb, pos.layer)) {
-            SBError(false, "DVPathFinder.cpp", 0x19c, "Actor in a wall at (%f,%f)", pos.posMap.x, pos.posMap.y);
-            return false;
+    };
+    // a walk inside one area, a lift or a house
+    auto inside = [&](DVSectorMotionArea* area, uint16_t layer, const SBGeoPoint2D& from, const SBGeoPoint2D& to,
+                      bool fromHere) {
+        if (area && area->IsBuilding()) {
+            order(CMD_TELEPORT, 0, to, nullptr, false);
+            return true;
         }
-        start = SBCenter(mb);
+        if (area && area->IsLift()) {
+            SBGeoVector2D d = to - from;
+            if (std::fabs(d.x) > 0.5f || std::fabs(d.y) > 0.5f)
+                order(CMD_MOVE_ANIM, DVLiftAnimation(area, from, to, command), to, nullptr, false);
+            return true;
+        }
+        return BuildMoveInArea(from, area, layer, to, command, movePosture, fromHere, out);
+    };
+    if (!cur || !goalArea || cur == goalArea) return inside(cur, pos.layer, pos.posMap, goal, true);
+    // DVSequence::AppendMoveToSequence: the doors on the way (FindPathDoors), each passed in two
+    // halves around its middle
+    std::vector<std::pair<DVDoor*, bool>> doors;
+    if (!grid->FindPathDoors(this, pos.posMap, cur, goal, goalArea, doors)) {
+        SBLog("%s: no door leads from area %d to area %d", KindName(), cur->id, goalArea->id);
+        // the old way: a walk on his own area
+        return inside(cur, pos.layer, pos.posMap, goal, true);
     }
-    if (!pos.sector || (pos.sector->type & 3) != 3) {
-        SBLog("%s is on no walkable area", KindName());
-        return false;
+    SBGeoPoint2D at = pos.posMap;
+    DVSectorMotionArea* area = cur;
+    uint16_t layer = pos.layer;
+    bool fromHere = true;
+    for (auto& [d, enter] : doors) {
+        if (!inside(area, layer, at, d->Entry(enter), fromHere)) return false;
+        order(CMD_MOVE_ANIM, d->Action1(enter, command), d->mid, d, enter);
+        order(CMD_MOVE_ANIM, d->Action2(enter, command), d->Exit(enter), nullptr, false);
+        at = d->Exit(enter);
+        area = d->To(enter);
+        layer = d->ToLayer(enter);
+        fromHere = false;
     }
-    uint16_t area = static_cast<DVSectorMotionArea*>(pos.sector)->areaIndex;
-    DVPathFinder* pf = DVEngine::mpEngine ? DVEngine::mpEngine->PathFinder() : nullptr;
-    if (!pf) return false;
-    std::vector<SBGeoPoint2D> path;
-    if (!pf->FindPath(pos.layer, area, pos.GetPathFinderIndex(movePosture), start, goal, adjusted, path)) {
-        SBLog("no way from %.0f,%.0f to %.0f,%.0f (layer %u area %u size %u)", start.x, start.y, goal.x, goal.y, pos.layer,
-              area, pos.GetPathFinderIndex(movePosture));
-        return false;
-    }
-    for (size_t i = adjusted ? 0 : 1; i < path.size(); ++i) {
-        DVOrder o;
-        o.id = DVOrder::NewID();
-        o.command = command;
-        o.goal = path[i];
-        out.push_back(o);
-    }
-    return !out.empty();
+    if (area && area->IsBuilding()) return true;  // he stays inside
+    return inside(area, layer, at, goal, false);
 }
 
 // a move ordered by the player (DVEngine::PerformGroupMove for one hero, 0x08294710): the place
@@ -281,13 +351,30 @@ bool DVElementActor::MoveTo(const SBGeoPoint2D& dest, bool run) {
     DVSprite* s = sprite.get();
     DVPositionInterface& pos = s->pos;
     DVFastFindGrid* grid = s->grid;
-    if (!grid || !active) return false;
-    SBGeoBoundingBox2D box = pos.GetMoveBoxMap() - pos.posMap + dest;
-    if (!grid->FindAutorizedPosition(box, dest, pos.layer)) {
-        SBLog("no place near %.0f,%.0f", dest.x, dest.y);
-        return false;
+    if (!grid || (!active && !InBuilding())) return false;
+    // what is under the tap (DVEngine::ManageInputMouseFocus: GetSectorScreen): a walkable area
+    // of some layer, a lift, a house's door
+    DVSectorMotionArea* area = nullptr;
+    uint16_t layer = pos.layer;
+    DVDoor* door = nullptr;
+    if (!grid->GetSectorScreen(dest, area, layer, door)) {
+        area = nullptr;
+        layer = InBuilding() ? 0 : pos.layer;
     }
-    SBGeoPoint2D goal = SBCenter(box);
+    SBGeoPoint2D goal = dest;
+    if (door) {
+        // into the house (or through the gate)
+        bool enter = Area() != door->b;
+        goal = door->Exit(enter);
+        area = door->To(enter);
+    } else if (!area || !area->IsLift()) {
+        SBGeoBoundingBox2D box = pos.GetMoveBoxMap() - pos.posMap + dest;
+        if (!grid->FindAutorizedPosition(box, dest, layer)) {
+            SBLog("no place near %.0f,%.0f", dest.x, dest.y);
+            return false;
+        }
+        goal = SBCenter(box);
+    }
     uint32_t posture = pos.posture;
     std::deque<DVOrder> seq;
     uint32_t movePosture = posture == POSTURE_LYING ? POSTURE_LYING : POSTURE_STANDING;
@@ -299,13 +386,15 @@ bool DVElementActor::MoveTo(const SBGeoPoint2D& dest, bool run) {
         movePosture = POSTURE_STANDING;
     }
     uint32_t cmd = run ? CMD_RUN : (movePosture == POSTURE_LYING ? CMD_CRAWL : CMD_WALK);
-    if (!BuildMove(goal, cmd, movePosture, seq)) return false;
+    if (!BuildMove(goal, cmd, movePosture, seq, area)) return false;
+    if (scriptElement) EndScriptElement(false);
     orders = seq;
     newOrder = true;
     return true;
 }
 
 void DVElementActor::Stop() {
+    if (scriptElement) EndScriptElement(false);
     orders.clear();
     newOrder = true;
     defaultCommand = CMD_NONE;
@@ -315,8 +404,10 @@ void DVElementActor::Stop() {
 void DVElementActor::MakeRunning() {
     if (orders.empty()) return;
     bool lying = sprite->pos.posture == POSTURE_LYING;
-    for (DVOrder& o : orders)
+    for (DVOrder& o : orders) {
         if (o.command == CMD_WALK || o.command == CMD_CRAWL) o.command = CMD_RUN;
+        if (o.command == CMD_MOVE_ANIM && (o.anim == CMD_WALK || o.anim == CMD_CRAWL)) o.anim = CMD_RUN;
+    }
     if (lying && orders.front().command != CMD_STAND_UP) {
         DVOrder o;
         o.id = DVOrder::NewID();
@@ -364,12 +455,21 @@ void DVElementActor::MakeWalking() {
 // DVElementActorHuman 0x0821e420, DVElementActor 0x0820da70) for the commands of this step
 void DVElementActor::Hourglass() {
     if (selectionPulse > 0) --selectionPulse;
-    if (!active) return;
+    if (!active) {
+        // in a house he is off the map, but goes on with his orders (out through a door)
+        if (InBuilding() && !orders.empty()) StepOrders();
+        return;
+    }
+    // DVElementActorHuman::Hourglass: out cold he lies; the concussion wears off
+    if (knockedOut && orders.empty() && !dead) defaultCommand = CMD_DEAD_KNOCKED;
+    if (concussion && DVEngine::mpEngine && ((DVEngine::mpEngine->frameCounter & 0x3f) == (creation & 0x1f)))
+        SetConcussion(concussion - 1);
     if (IsNPC()) {
         NPCHourglass();
         return;
     }
-    if (!IsHero()) return;
+    // the animals and horses only move for the scripts here
+    if (!IsHero() && orders.empty() && !scriptElement) return;
     StepOrders();
 }
 
@@ -388,6 +488,11 @@ bool DVElementActor::StepOrders() {
             pos.direction ^= 8;
             s->PerformAction(0, CMD_KNOCKED, 0xc, false);
             pos.direction ^= 8;
+        } else if ((defaultCommand == CMD_SCRIPT_FREEZE || defaultCommand == CMD_SCRIPT_LOOP) &&
+                   s->HasAnimation(defaultAnim)) {
+            // DVElementActor::Execute 0xec without an order: the script's animation stays on its
+            // last frame (or goes on looping)
+            s->PerformAction(0, defaultAnim, defaultCommand == CMD_SCRIPT_LOOP ? 0xb : 0xc, false);
         } else if (defaultCommand == CMD_SHOOT || defaultCommand == CMD_SHOOT_LYING) {
             // after a shot the gun stays up (Execute 0x1c without an order)
             s->PerformAction(0, defaultCommand, 0xb, false);
@@ -491,6 +596,92 @@ bool DVElementActor::StepOrders() {
         r = o.tolerance <= 0.0f ? 3 : 2;
         if (r == 3 && firearm) ammo = (int16_t)firearm->magazine;
         break;
+    case CMD_PUNCH: {
+        // DVElementActorHuman::Execute 0xe9: the punch; at the blow's frame whoever is within 40
+        // in front of him is hit (0x2d)
+        if (first) pos.direction = pos.directionWanted;
+        r = s->PerformAction(o.id, CMD_PUNCH_ANIM, 0, false);
+        if (r == 0 && DVEngine::mpEngine) {
+            for (DVElementActor* v : DVEngine::mpEngine->Characters()) {
+                if (v == this || !v->active || (v->classFlags & 7) != 7 || v->dead) continue;
+                SBGeoVector2D d = v->sprite->pos.posMap - pos.posMap;
+                if (std::max(std::fabs(d.x), std::fabs(d.y)) >= 40.0f) continue;
+                if ((SBGetSector0to15(d, 0.57357645f) & 0xf) != pos.direction) continue;
+                v->KnockHit(o.damage, this);
+                break;
+            }
+        }
+        break;
+    }
+    case CMD_KNOCKED:
+        // DVElementActorHuman::Translate 0x2d: he falls (the animation is drawn the other way
+        // round, as the knocked out default shows it)
+        if (first) pos.direction = pos.directionWanted;
+        pos.direction ^= 8;
+        r = s->PerformAction(o.id, CMD_KNOCKED, 0, false);
+        pos.direction ^= 8;
+        if (r == 3) {
+            SetStates(POSTURE_LYING, 0);
+            if (!knockedOut) {
+                DVOrder up;
+                up.id = DVOrder::NewID();
+                up.command = CMD_STAND_UP;
+                orders.push_back(up);
+            }
+        }
+        break;
+    case CMD_SCRIPT_ANIM:
+    case CMD_SCRIPT_LOOP:
+    case CMD_SCRIPT_FREEZE:
+        // DVElementActor::Execute 0xea / 0xeb / 0xec: the script's animation
+        if (!s->HasAnimation(o.anim)) {
+            r = 4;
+            break;
+        }
+        r = s->PerformAction(o.id, o.anim, 0, false);
+        if (r == 3 && o.command == CMD_SCRIPT_FREEZE) {
+            s->ResetSpriteFrame(true);
+        }
+        break;
+    case CMD_MOVE_ANIM: {
+        // a door's half or a lift: the move with its animation; an animation that doesn't move
+        // (getting on a ladder) plays to its end and puts him there. At the door's middle he
+        // passes it (DVElementActor::Execute: PassDoor)
+        uint32_t a = o.anim;
+        if (!s->HasAnimation(a)) a = s->HasAnimation(CMD_WALK) ? (uint32_t)CMD_WALK : a;
+        if (!s->HasAnimation(a) || InBuilding()) {
+            pos.SetPositionMap(o.goal);
+            pos.ComputePositionAll();
+            r = 3;
+        } else if (s->GetDistanceForAnimation(a) <= 0.0f) {
+            if (first) {
+                SBGeoVector2D d = o.goal - pos.posMap;
+                if (d.x != 0.0f || d.y != 0.0f) pos.direction = pos.directionWanted = (uint16_t)(SBGetSector0to15(d, 0.57357645f) & 0xf);
+            }
+            r = s->PerformAction(o.id, a, 0, false);
+            if (r == 3) {
+                pos.SetPositionMap(o.goal);
+                pos.ComputePositionAll();
+            }
+        } else {
+            pos.Turn();
+            r = s->PerformMotion(o.id, o.goal, 0.0f, a, 1, 0, false);
+            if (r == 1 && pos.posture == POSTURE_LYING && a != CMD_CRAWL) SetStates(POSTURE_STANDING, 1);
+        }
+        if (r == 3 && o.door) PassDoor(o.door, o.enter);
+        break;
+    }
+    case CMD_TELEPORT:
+        // inside a house: to the door he goes out by
+        pos.SetPositionMap(o.goal);
+        pos.ComputePositionAll();
+        r = 3;
+        break;
+    case CMD_LEAVE:
+        // the end of DVScript::RecordLeaveGame's walk: off the map
+        active = false;
+        r = 3;
+        break;
     case CMD_TURN:
         // DVElementActor::Translate 0x1d sets the wanted direction; Execute 0xe0 turns two
         // sixteenths a tick, stepping on the spot (the walk animation)
@@ -521,15 +712,22 @@ bool DVElementActor::StepOrders() {
     bool ended = false;
     if (r == 3 || r == 4) {
         uint32_t done = o.command;
+        uint32_t doneAnim = o.anim;
         orders.pop_front();
         newOrder = true;
         if (orders.empty()) {
             defaultCommand = IsNPC() ? CMD_WAIT : CMD_NONE;
             if (done == CMD_DIE) defaultCommand = CMD_DEAD;
+            else if (done == CMD_KNOCKED && knockedOut) defaultCommand = CMD_DEAD_KNOCKED;
             else if (done == CMD_SHOOT || done == CMD_SHOOT_LYING) defaultCommand = done;
+            else if (done == CMD_SCRIPT_FREEZE || done == CMD_SCRIPT_LOOP) {
+                defaultCommand = done;
+                defaultAnim = doneAnim;
+            }
             ended = true;
         }
     }
+    if (ended && scriptElement) EndScriptElement(true);
     s->displayOrder = pos.pos3D.y;
     return ended;
 }
@@ -543,6 +741,7 @@ uint32_t DVElementActor::CurrentCommand() const {
 
 // DVSequenceManager::LaunchSequence for one actor: the orders replace the current ones
 void DVElementActor::Launch(const std::deque<DVOrder>& seq, bool move) {
+    if (scriptElement) EndScriptElement(false);
     orders = seq;
     newOrder = true;
     isMove = move;
@@ -988,6 +1187,62 @@ static float CommandFactor(uint32_t c) {
     }
 }
 
+// DVElementActorHuman::GetShadowZone (0x08229280): at night, the shadow (a sight obstacle that
+// doesn't stop the eyes, flag 1 off) whose volume holds him; -1 if none. An NPC sees someone in a
+// shadow only from inside the same shadow (DVElementActorNPC::IsDetecting).
+int32_t DVElementActor::ShadowZone() const {
+    DVEngine* e = DVEngine::mpEngine;
+    if (!e || !e->night || !sprite || !sprite->grid) return -1;
+    SBGeoPoint3D mid, head, feet;
+    DetectionPoints(mid, head, feet);
+    auto top = [](const DVSightObstacle* o, float x, float y) { return o->plane.zx * x + o->plane.zy * y + o->plane.zc; };
+    auto ground = [](const DVSightObstacle* o, float x, float y) {
+        return o->planeGround.zx * x + o->planeGround.zy * y + o->planeGround.zc;
+    };
+    SBGeoBoundingBox2D box;
+    box.Expand(SBGeoPoint2D(mid.x, mid.y));
+    box.Expand(SBGeoPoint2D(head.x, head.y));
+    box.Expand(SBGeoPoint2D(feet.x, feet.y));
+    std::vector<DVSightObstacle*> obs;
+    sprite->grid->GetObstacles(obs, 0, box, 2);
+    SBGeoPoint2D p(mid.x, mid.y);
+    bool lying = sprite->pos.posture == POSTURE_LYING;
+    for (const DVSightObstacle* o : obs) {
+        if (!o || (o->flags & 1) || !o->box.IsInside_p(p) || !o->polygon.IsInside_p(p)) continue;
+        if (lying) {
+            if (head.z <= top(o, head.x, head.y) && (o->flat || ground(o, head.x, head.y) <= head.z) &&
+                feet.z <= top(o, feet.x, feet.y) && (o->flat || ground(o, feet.x, feet.y) <= feet.z))
+                return (int32_t)o->serial;
+        } else {
+            float t = top(o, mid.x, mid.y);
+            if (o->flat) {
+                if (head.z <= t && feet.z <= t) return (int32_t)o->serial;
+            } else {
+                float g = ground(o, mid.x, mid.y);
+                if (head.z <= t && g <= head.z && feet.z <= t && g <= feet.z) return (int32_t)o->serial;
+            }
+        }
+    }
+    return -1;
+}
+
+// DVElementActorPC::IsObviouslyHostile (0x08247ea0): what he is doing is plainly an attack (a
+// shot, a blow, a knife, a trap...)
+bool DVElementActor::IsObviouslyHostile() const {
+    uint32_t c = CurrentCommand();
+    if (c == CMD_PUNCH) return true;
+    if (c >= 0x76) return c - 0x76u < 0x1e && ((0x3f800001u >> (c - 0x76u)) & 1);
+    switch (c) {
+    case 8: case 0x11: case 0x1b: case 0x1c: case 0x1d: case 0x23: case 0x24: case 0x29: case 0x2a:
+    case 0x2b: case 0x31: case 0x36: case 0x37: case 0x38: case 0x39: case 0x3c: case 0x3e: case 0x3f:
+    case 0x40: case 0x41: case 0x42: case 0x43: case 0x44: case 0x45: case 0x46: case 0x47: case 0x52:
+    case 0x59: case 0x5a: case 0x5f:
+        return true;
+    default:
+        return false;
+    }
+}
+
 uint8_t DVElementActor::DetectHero(const DVElementActor* hero, uint16_t& speed) const {
     speed = 0;
     if ((view.status | 8) == 8) return 0;
@@ -995,6 +1250,14 @@ uint8_t DVElementActor::DetectHero(const DVElementActor* hero, uint16_t& speed) 
     const DVPositionInterface& hp = hero->sprite->pos;
     if (hp.layer != sprite->pos.layer) return 0;
     if (hp.posture == 3 || hp.posture == 0xe) return 0;
+    // at night one in a shadow is only seen from inside it
+    int32_t zone = hero->ShadowZone();
+    if (zone != -1 && zone != ShadowZone()) return 0;
+    // Kate in her dress (the other profile) is a lady: no one minds her unless she does
+    // something hostile or has already scared him (IsDetecting: sprite +0x1fe)
+    if (hero->kind == KIND_KATE && hero->sprite->useAlt && !hero->IsObviouslyHostile() && hero->CurrentCommand() != 0x4a &&
+        !(ai && ai->yellowBack))
+        return 0;
     SBGeoPoint3D e = EyesPoint();
     SBGeoPoint3D P = hp.pos3D;
     SBGeoVector2D d(P.x - e.x, (P.y - e.y) * 1.7434468f);
@@ -1103,10 +1366,6 @@ void DVElementActor::RefreshDetection() {
     DVArtificialIntelligence* b = ai.get();
     if (!b || sprite->pos.posture == 0xe || knockedOut) return;
     detecting = false;
-    // an NPC driven by a level script gets its stimuli through the script's FilterEvent first (the
-    // gate guard of mission 2 talks to Cooper instead of raising the alarm): until the script engine
-    // runs them, these NPCs do not react to what they see
-    if (!scriptName.empty()) return;
     DVEngine* e = DVEngine::mpEngine;
     if (!e) return;
     const std::vector<DVElementActor*>& heroes = e->Heroes();
@@ -1115,7 +1374,17 @@ void DVElementActor::RefreshDetection() {
     uint8_t bestLevel = 0;
     for (size_t i = 0; i < heroes.size(); ++i) {
         uint16_t sp = 0;
-        uint8_t lvl = DetectHero(heroes[i], sp);
+        // who he looks out for: a villain off duty (attitude 1) only for a hero who does something
+        // hostile (DVElementActorPC::IsObviouslyHostile), a civilian off duty for no one; Kate
+        // is seen anyway when she shows her leg (action state 7) or after a scare (+0x24c)
+        const DVElementActor* h = heroes[i];
+        bool look = true;
+        if (b->attitude == 1) look = kind == KIND_VILLAIN && h->IsObviouslyHostile();
+        if (h->kind == KIND_KATE) look = h->actionState == 7 || look || b->yellowBack != 0;
+        // DVArtificialMalignity::EventViewStandardProcedure: a prisoner held at gunpoint is no
+        // business of theirs (IsPrisoner), as long as he does nothing hostile
+        if (h->IsHeldPrisoner() && !h->IsObviouslyHostile()) look = false;
+        uint8_t lvl = look ? DetectHero(h, sp) : 0;
         if (lvl) {
             if (sp > best) {
                 best = sp;
@@ -1323,4 +1592,7 @@ int DVElementTarget::LoadStateFromFile(SBFile& f) {
     return n + 0x10 + (int)scriptName.size();
 }
 
-void DVElementTarget::Hourglass() {}
+// DVElementTarget::Hourglass (0x08265c90)
+void DVElementTarget::Hourglass() {
+    if (active) sprite->PerformVirginIncrement(progression);
+}

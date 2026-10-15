@@ -313,7 +313,16 @@ uint8_t* VMCore::Symbol(uint16_t s) {
 int32_t VMCore::Call(VMInstance& inst, const std::string& function, const std::vector<int32_t>& params) {
     const VMFunction* f = inst.cls ? inst.cls->Function(function) : nullptr;
     if (!f) return 0;
+    // a native of a running script may call another script (an event): the running one's state
+    // is kept
     VMInstance* saved = current;
+    int32_t savedPc = pc, savedRet = retValue, savedNativeRet = nativeRet;
+    int savedCount = nativeCount;
+    int32_t savedParams[16];
+    std::memcpy(savedParams, nativeParams, sizeof savedParams);
+    std::vector<uint8_t> savedPending = pending;
+    pending.clear();
+    nativeCount = 0;
     current = &inst;
     if (inst.vars.size() < (size_t)inst.cls->sizeOfVariables) inst.vars.resize(inst.cls->sizeOfVariables, 0);
     Record r;
@@ -328,7 +337,14 @@ int32_t VMCore::Call(VMInstance& inst, const std::string& function, const std::v
     Run();
     stack.resize(depth);
     current = saved;
-    return retValue;
+    int32_t result = retValue;
+    pc = savedPc;
+    retValue = savedRet;
+    nativeRet = savedNativeRet;
+    nativeCount = savedCount;
+    std::memcpy(nativeParams, savedParams, sizeof savedParams);
+    pending = std::move(savedPending);
+    return result;
 }
 
 static int32_t NotYet(VMCore&, const int32_t*) { return 0; }

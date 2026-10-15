@@ -4,6 +4,7 @@
 #pragma once
 #include <cstdint>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -21,6 +22,9 @@ class DVShadowPolygon;
 class DVArmsTrader;
 class DVScript;
 class DVPsychoanalyst;
+class DVDialogue;
+class DVSequenceManager;
+class DVSequenceElement;
 
 class DVEngine {
 public:
@@ -101,6 +105,54 @@ public:
     DVElementActor* deadHero = nullptr;
     bool highlander = false;   // the cheat: the heroes can't be killed
 
+    // ---- the scripts (step 4) ------------------------------------------------------------------
+    DVScript* Script() const { return script.get(); }
+    std::unique_ptr<DVDialogue> dialogue;           // +0x27c
+    std::unique_ptr<DVSequenceManager> sequences;   // +0x6d4
+    // DVEngine::PerformExecuteCommand (0x08293770): the sequences' elements without an actor
+    void PerformExecuteCommand(DVSequenceElement* e);
+    // DVEngine::LockUser (0x08293c10): the player's hands are tied (a cut scene)
+    void LockUser(bool on);
+    bool userLocked = false;      // +0x118
+    bool briefing = false;        // +0x11b the intro / a cut scene (the interface is hidden)
+    // the camera the scripts move (+0xb5c the goal, +0xd3c the speed, +0x888 the element waiting)
+    void CameraScrollTo(const SBGeoPoint2D& p, float speed, uint16_t fixedSpeed);
+    void CameraJumpTo(const SBGeoPoint2D& p);
+    SBGeoPoint2D CheckLocationIsValidForCamera(const SBGeoPoint2D& p) const;  // DVScript, 0x0834a5d0
+    bool cameraScrolling = false;
+    SBGeoPoint2D cameraGoal;
+    uint16_t cameraFixedSpeed = 0;   // +0xb6c
+    float cameraRamp = 0;            // +0xd40 (the table at +0xc64)
+    DVSequenceElement* cameraElement = nullptr;
+    bool cameraMoved = false;        // the app takes the engine's camera
+    DVElement* follow = nullptr;     // +0xd4c... SelectFollowElement: the camera stays on him
+    float zoomWanted = -1.0f;        // +0xbc8
+    std::vector<DVSequenceElement*> timers;   // +0xf8c
+    // DVEngine::SetHint (0x082a7280): the tutorial's hint (1..), 0 = none
+    void SetHint(uint32_t h) { hint = h; }
+    uint32_t hint = 0;
+    // DVMenu::AddSentence / DoneSentence: the objectives
+    struct Sentence {
+        uint32_t id;
+        bool done;
+    };
+    std::vector<Sentence> sentences;
+    void AddSentence(uint32_t id);
+    void DoneSentence(uint32_t id);
+    int victoryText = -1;            // +0xff4 DVScript::ChooseVictoryDefeatText
+    int missionResult = 0;           // CheckVictoryCondition: 1 accomplished, 2 failed
+    bool forceVictoryCheck = false;  // +0xd24
+    int32_t skipData = -1;           // ISetSkipData: the intro can be skipped
+    bool mapShown = false;
+    std::set<int32_t> patches;       // the patches the scripts applied
+    void StateSelectActor(uint16_t kind);   // 0x082a51c0 (ISelectPC)
+    // every character (heroes, NPCs, animals) of the level, on the map or not
+    const std::vector<DVElementActor*>& Characters() const { return characters; }
+    // skips the intro: the game runs on at once (no voices, no waiting) until it is over
+    void SkipBriefing();
+    bool fast = false;
+    uint32_t frameCounter = 0;       // +0xd18
+
 private:
     SBDrawManager* draw;
     std::unique_ptr<DVFrameHolder> frames;  // +0x168
@@ -112,6 +164,7 @@ private:
     uint32_t minimap = 0;      // +0xba8
     std::vector<DVElementActor*> heroes;
     std::vector<DVElementActor*> npcs;      // +0xd88
+    std::vector<DVElementActor*> characters;  // +0xda4
     std::unique_ptr<DVHikingGuide> hiking;  // +0xe10
     std::unique_ptr<DVShadowPolygon> shadow;  // +0x90c
     std::unique_ptr<DVScript> script;          // DVScript (the mission's scripts)

@@ -3,6 +3,8 @@
 #include "dv/DVArtificialIntelligence.h"
 #include "dv/DVHikingGuide.h"
 #include "dv/DVArmsTrader.h"
+#include "dv/DVDialogue.h"
+#include "dv/DVSequence.h"
 #include "dv/DVScript.h"
 #include "dv/DVShadowPolygon.h"
 
@@ -42,12 +44,19 @@ DVEngine::DVEngine(SBDrawManager* d) : draw(d) {
     pathFinder->SetObstacles(grid.get());
     hiking.reset(new DVHikingGuide());
     shadow.reset(new DVShadowPolygon());
+    sequences.reset(new DVSequenceManager());
+    dialogue.reset(new DVDialogue());
+    script.reset(new DVScript());
     DVSector::ResetCounters();
     DVArtificialIntelligence::mCurrentOverallAlertStatus = 0;
+    DVArtificialIntelligence::mbFreeze = false;
     DVArtificialIntelligence::mCurrentOverallVillainAlertStatus = 0;
 }
 
 DVEngine::~DVEngine() {
+    script.reset();
+    sequences.reset();
+    dialogue.reset();
     ownElements.clear();
     elements.clear();
     if (draw) {
@@ -95,6 +104,16 @@ bool DVEngine::LoadStateFromFile(const std::string& name) {
         case 0x4d41534b: done = grid->LoadMaskFromFile(f); break;            // MASK
         case 0x454c454d: done = LoadElemFromFile(f); break;                 // ELEM
         case 0x57415953: done = hiking->LoadAllPathesFromFile(f); break;     // WAYS
+        case 0x53435250: done = script->LoadScriptObjectsFromFile(f); break;  // SCRP
+        case 0x444c4753: done = dialogue->LoadDialogue(f); break;            // DLGS
+        case 0x4c494654: done = grid->LoadLiftsFromFile(f); break;            // LIFT
+        case 0x4255494c: {                                                   // BUIL
+            std::vector<DVElementActor*> actors;  // the characters (+0xda4) in their loading order
+            for (auto& e : ownElements)
+                if (auto* a = dynamic_cast<DVElementActor*>(e.get())) actors.push_back(a);
+            done = grid->LoadBuildingsFromFile(f, actors);
+            break;
+        }
         default: break;  // the others come with the next steps
         }
         if (done >= 0 && (uint32_t)done != len)
@@ -112,33 +131,82 @@ bool DVEngine::LoadStateFromFile(const std::string& name) {
     // StateCenterOn does)
     heroes.clear();
     for (auto& e : ownElements)
-        if (e->kind >= KIND_COOPER && e->kind <= KIND_MIA && e->active) heroes.push_back(static_cast<DVElementActor*>(e.get()));
+        if (e->kind >= KIND_COOPER && e->kind <= KIND_MIA) heroes.push_back(static_cast<DVElementActor*>(e.get()));
     std::sort(heroes.begin(), heroes.end(), [](DVElementActor* a, DVElementActor* b) { return a->kind < b->kind; });
-    if (!heroes.empty()) {
-        Select(heroes[0]);
-        camera = heroes[0]->sprite->pos.posMap - screen * 0.5f;
-    }
+    for (DVElementActor* h : heroes)
+        if (h->active) {
+            Select(h);
+            camera = h->sprite->pos.posMap - screen * 0.5f;
+            break;
+        }
     ClampCamera();
     // the NPCs (DVEngine +0xd88) and their brains (DVArtificialIntelligence::InitAI, called by
     // DVGame::GameLoop when the mission starts)
     npcs.clear();
+    characters.clear();
     for (auto& e : ownElements)
-        if ((e->kind == KIND_VILLAIN || e->kind == KIND_CIVILIAN) && e->active) {
+        if (auto* a = dynamic_cast<DVElementActor*>(e.get())) characters.push_back(a);
+    for (auto& e : ownElements)
+        if (e->kind == KIND_VILLAIN || e->kind == KIND_CIVILIAN) {
             auto* a = static_cast<DVElementActor*>(e.get());
             a->frameOffset = (uint8_t)npcs.size();
             npcs.push_back(a);
         }
     for (DVElementActor* a : npcs)
         if (a->ai) a->ai->InitOneAI();
+    // DVArtificialIntelligence::InitAI: the prisoners (the NPCs of role 0x16 and the heroes a
+    // menacer sees around him) each held by the nearest menacer (role 0x1b), one each
+    {
+        std::vector<DVElementActor*> menacers, prisoners;
+        for (DVElementActor* a : npcs)
+            if (a->ai && a->active) {
+                if (a->ai->role == 0x1b) menacers.push_back(a);
+                if (a->ai->role == 0x16) prisoners.push_back(a);
+            }
+        for (DVElementActor* h : heroes) {
+            if (!h->active) continue;
+            for (DVElementActor* m : menacers) {
+                if (m->sprite->pos.layer != h->sprite->pos.layer) continue;
+                SBGeoVector2D d = h->sprite->pos.posMap - m->sprite->pos.posMap;
+                if (d.x * d.x + d.y * d.y > (float)m->view.radius * (float)m->view.radius) continue;
+                prisoners.push_back(h);
+                break;
+            }
+        }
+        if (!prisoners.empty() && menacers.empty())
+            SBError(false, "DVArtificialIntelligence.cpp", 0x110b, "There are %zu prisoners, but no menacers", prisoners.size());
+        for (DVElementActor* p : prisoners) {
+            DVElementActor* best = nullptr;
+            float bd = 0;
+            for (DVElementActor* m : menacers) {
+                SBGeoVector2D d = p->sprite->pos.posMap - m->sprite->pos.posMap;
+                float q = d.x * d.x + d.y * d.y;
+                if (!best || q < bd) best = m, bd = q;
+            }
+            if (!best) {
+                SBError(false, "DVArtificialIntelligence.cpp", 0x1170, "Prisoner at point (%u, %u) couldn't find a menacer.",
+                        (unsigned)p->sprite->pos.posMap.x, (unsigned)p->sprite->pos.posMap.y);
+                continue;
+            }
+            menacers.erase(std::find(menacers.begin(), menacers.end(), best));
+            SBLog("%s is held at gunpoint by %s at %.0f,%.0f", p->KindName(), best->KindName(), best->sprite->pos.posMap.x,
+                  best->sprite->pos.posMap.y);
+            p->menacer = best;
+            best->SetViewTarget(p, true);
+            best->SetViewCone(8);
+            if (best->ai) best->ai->target = p;
+        }
+    }
     for (DVElementActor* h : heroes) h->InitFirearm();
     // the mission's scripts (DVScript::Initialize): StartUp and the scripted elements
     {
         std::vector<DVElement*> all;
         for (auto& e : ownElements) all.push_back(e.get());
-        script.reset(new DVScript());
         script->Initialize(this, all, levelName);
     }
-    if (selected && !selected->playable) SelectNextPlayable();
+    if (!selected || !selected->playable || (!selected->active && !selected->InBuilding())) SelectNextPlayable();
+    if (selected && !cameraMoved) camera = selected->sprite->pos.posMap - screen * 0.5f;
+    ClampCamera();
     return background != 0;
 }
 
@@ -284,14 +352,213 @@ void DVEngine::ClampCamera() {
 void DVArtificialIntelligenceTick();
 void DVEngine::PerformHourglass() {
     ++ticks;
+    if (dialogue) dialogue->Refresh();
+    // the scripts: StartUp's HourGlass each second, CheckVictoryCondition every third
+    if (script && script->loaded && missionResult == 0 && !missionFailed && frameCounter % 25 == 0) {
+        uint32_t sec = frameCounter / 25;
+        script->HourGlass(sec);
+        if (sec % 3 == 0 || forceVictoryCheck) {
+            forceVictoryCheck = false;
+            int r = script->CheckVictoryCondition(sec);
+            if (r == 1) {
+                missionResult = 1;
+                SBLog("mission accomplished");
+            } else if (r == 2) {
+                missionResult = 2;
+                missionFailed = true;
+                SBLog("mission failed (the script)");
+            }
+        }
+    }
+    ++frameCounter;
     DVArtificialIntelligenceTick();
+    if (sequences) sequences->Hourglass();
+    // the camera the scripts move (DVEngine::PerformManageKeyScrolling)
+    if (cameraScrolling) {
+        SBGeoVector2D d = cameraGoal - camera;
+        float len = std::sqrt(d.x * d.x + d.y * d.y);
+        float speed = cameraFixedSpeed ? (float)cameraFixedSpeed : cameraRamp;
+        cameraRamp = std::min(cameraRamp * 1.05f, 31.1f);
+        if (len <= speed + 0.5f) {
+            camera = cameraGoal;
+            cameraScrolling = false;
+            if (DVSequenceElement* e = cameraElement) {
+                cameraElement = nullptr;
+                e->SetState(SEQ_DONE);
+            }
+        } else {
+            camera = camera + d * (speed / len);
+        }
+        cameraMoved = true;
+    }
+    if (follow && follow->sprite && !cameraScrolling) {
+        camera = CheckLocationIsValidForCamera(follow->sprite->pos.posMap);
+        cameraMoved = true;
+    }
     for (DVElement* e : elements) e->Hourglass();
+    // the zones the characters came into or left
+    if (script && script->loaded)
+        for (DVElementActor* a : characters)
+            if (a->active) script->CheckZones(a, false);
+    // the scripts' timers (in ticks)
+    for (size_t i = 0; i < timers.size();) {
+        DVSequenceElement* e = timers[i];
+        if (--e->param < 0) {
+            timers.erase(timers.begin() + i);
+            e->SetState(SEQ_DONE);
+        } else {
+            ++i;
+        }
+    }
     SortForEngine();
+}
+
+void DVEngine::PerformExecuteCommand(DVSequenceElement* e) {
+    switch (e->command) {
+    case 4:
+        LockUser(true);
+        break;
+    case 5:
+        LockUser(false);
+        break;
+    case 6:  // the camera scrolls there; the element waits for it
+        if (DVSequenceElement* old = cameraElement) {
+            cameraElement = nullptr;
+            old->SetState(SEQ_DONE);
+        }
+        cameraElement = e;
+        e->state = SEQ_RUNNING;
+        CameraScrollTo(e->point, 2.0f, e->param16);
+        return;
+    case 7:
+        if (DVSequenceElement* old = cameraElement) {
+            cameraElement = nullptr;
+            old->SetState(SEQ_DONE);
+        }
+        CameraJumpTo(e->point);
+        break;
+    case 8:
+        zoomWanted = e->value;
+        break;
+    case 9:
+        mapShown = e->flag10;
+        break;
+    case 0xb:  // a timer
+        e->state = SEQ_RUNNING;
+        timers.push_back(e);
+        return;
+    case 0xc:  // a dialogue; the element waits for its end
+        if (dialogue && dialogue->PreparePlayDialogue((uint32_t)e->param)) {
+            if (dialogue->element && dialogue->element != e) dialogue->element->SetState(SEQ_DONE);
+            dialogue->element = e;
+            e->state = SEQ_RUNNING;
+            return;
+        }
+        break;
+    case 0xd:  // the briefing starts (PerformSnapshot / SaveStateBeforeBriefing are for the save)
+        briefing = true;
+        LockUser(true);
+        break;
+    case 0xe:
+        briefing = false;
+        LockUser(false);
+        if (fast) {
+            fast = false;
+            if (dialogue) dialogue->fast = false;
+        }
+        break;
+    case 0xf:  // SelectFollowElement
+        if (DVSequenceElement* old = cameraElement) {
+            cameraElement = nullptr;
+            old->SetState(SEQ_DONE);
+        }
+        follow = e->target;
+        break;
+    case 0x10:
+        follow = nullptr;
+        break;
+    case 0x56:
+        if (auto* a = dynamic_cast<DVElementActor*>(e->actor))
+            if (e->param16 < 6) a->actionAvailable[e->param16] = e->flag11;
+        break;
+    case 0x57:
+        if (auto* a = dynamic_cast<DVElementActor*>(e->actor)) {
+            a->playable = e->flag11;
+            if (!a->playable && selected == a) SelectNextPlayable();
+            if (a->playable && !selected) Select(a);
+        }
+        break;
+    default:
+        break;
+    }
+    e->SetState(SEQ_DONE);
+}
+
+void DVEngine::LockUser(bool on) {
+    if (on == userLocked) return;
+    userLocked = on;
+}
+
+SBGeoPoint2D DVEngine::CheckLocationIsValidForCamera(const SBGeoPoint2D& p) const {
+    SBGeoPoint2D c(std::floor(p.x - screen.x / (zoom * 2.0f)), std::floor(p.y - screen.y / (zoom * 2.0f)));
+    float w = screen.x / zoom, h = screen.y / zoom;
+    if (c.x + w > mapW) c.x = mapW - w;
+    if (c.y + h > mapH) c.y = mapH - h;
+    if (c.x < 0) c.x = 0;
+    if (c.y < 0) c.y = 0;
+    return c;
+}
+
+void DVEngine::CameraScrollTo(const SBGeoPoint2D& p, float speed, uint16_t fixedSpeed) {
+    (void)speed;
+    cameraGoal = CheckLocationIsValidForCamera(p);
+    cameraScrolling = true;
+    cameraFixedSpeed = fixedSpeed;
+    cameraRamp = 6.0f;
+    follow = nullptr;
+}
+
+void DVEngine::CameraJumpTo(const SBGeoPoint2D& p) {
+    camera = CheckLocationIsValidForCamera(p);
+    cameraScrolling = false;
+    cameraMoved = true;
+    follow = nullptr;
+}
+
+void DVEngine::AddSentence(uint32_t id) {
+    for (const Sentence& s : sentences)
+        if (s.id == id) return;
+    sentences.push_back({id, false});
+}
+
+void DVEngine::DoneSentence(uint32_t id) {
+    for (Sentence& s : sentences)
+        if (s.id == id) s.done = true;
+}
+
+void DVEngine::StateSelectActor(uint16_t kind) {
+    for (DVElementActor* h : heroes)
+        if (h->kind == kind && h->playable && (h->active || h->InBuilding())) Select(h);
+}
+
+// the intro skipped: the game runs at once to its end (the original loads the state saved after
+// it, Data\Levels\Briefing\..., ISetSkipData)
+void DVEngine::SkipBriefing() {
+    if (!briefing) return;
+    fast = true;
+    if (dialogue) {
+        dialogue->fast = true;
+        dialogue->Mute();
+    }
+    for (int i = 0; i < 25 * 60 * 10 && briefing && !missionFailed; ++i) PerformHourglass();
+    fast = false;
+    if (dialogue) dialogue->fast = false;
+    cameraMoved = true;
 }
 
 void DVEngine::SelectNextPlayable() {
     for (DVElementActor* h : heroes)
-        if (h->playable && !h->dead) {
+        if (h->playable && (h->active || h->InBuilding()) && !h->dead) {
             Select(h);
             return;
         }
@@ -299,7 +566,7 @@ void DVEngine::SelectNextPlayable() {
 }
 
 void DVEngine::Select(DVElementActor* h) {
-    if (h && !h->playable) return;
+    if (h && (!h->playable || (!h->active && !h->InBuilding()))) return;
     for (DVElementActor* o : heroes) o->selected = false;
     selected = h;
     if (h) {
@@ -343,6 +610,7 @@ void DVEngine::ToggleWatched(DVElementActor* n) { watched = watched == n ? nullp
 
 bool DVEngine::OrderShoot(DVElement* target) {
     if (!selected || missionFailed) return false;
+    if (userLocked || missionResult) return false;
     return selected->OrderShoot(target);
 }
 
@@ -394,6 +662,7 @@ void DVEngine::HeroDied(DVElementActor* hero) {
 
 bool DVEngine::OrderMove(const SBGeoPoint2D& p, bool run) {
     if (!selected || selected->dead || missionFailed) return false;
+    if (userLocked || missionResult) return false;
     return selected->MoveTo(p, run);
 }
 
@@ -402,7 +671,7 @@ void DVEngine::OrderMakeRunning() {
 }
 
 void DVEngine::OrderCrouch() {
-    if (!selected || selected->dead || missionFailed) return;
+    if (!selected || selected->dead || missionFailed || userLocked) return;
     if (selected->Posture() == POSTURE_LYING) selected->MakeWalking();
     else selected->MakeCrawling();
 }

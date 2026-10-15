@@ -1,5 +1,6 @@
 #include "dv/DVFastFindGrid.h"
 
+#include "dv/DVDoor.h"
 #include "dv/DVMask.h"
 #include "dv/DVSector.h"
 
@@ -66,6 +67,7 @@ int DVFastFindGrid::LoadMotionObstaclesFromFile(SBFile& f) {
             auto* area = new DVSectorMotionArea();
             ownSectors.emplace_back(area);
             area->isLift = layer == (uint16_t)(layerCount - 1);
+            if (area->isLift) area->type |= SECTOR_LIFT;
             area->type |= 0x40;
             area->layer = layer;
             area->areaIndex = a;
@@ -76,6 +78,7 @@ int DVFastFindGrid::LoadMotionObstaclesFromFile(SBFile& f) {
             AddSector(area);
             AddSectorLines(area, layer, true);
             layers[layer].areas.push_back(area);
+            AddLayerSector(area, layer);
             uint16_t segs = f.U16();
             k = n + 2 + k;
             for (uint16_t s = 0; s < segs; ++s) {
@@ -91,6 +94,7 @@ int DVFastFindGrid::LoadMotionObstaclesFromFile(SBFile& f) {
                 sec->layer = layer;
                 n += sec->LoadFromFile(f);
                 AddSector(sec);
+                AddLayerSector(sec, layer);
                 AddSectorLines(sec, layer, true);
             }
         }

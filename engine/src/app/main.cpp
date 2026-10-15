@@ -3,25 +3,31 @@
 // tap twice to run (the original's click / double click), tap an NPC to show / hide his view
 // cone. The buttons on the left select the heroes (with their life), the ones on the right make
 // the hero lie down / stand up and raise his gun (then a tap on an enemy shoots, a double tap on
-// the gun reloads). Arrows at the top switch between the missions.
+// the gun reloads). Arrows at the top switch between the missions. The scripts' cut scenes show
+// black bars and a Skip button; a tap says the dialogue's next line.
 #include <SDL.h>
 
 #include <GLES3/gl3.h>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <vector>
 
 #include "app/Camera.h"
+#include "app/GameUI.h"
 #include "app/Overlay.h"
 #include "dv/DVArmsTrader.h"
+#include "dv/DVDialogue.h"
 #include "dv/DVElement.h"
 #include "dv/DVEngine.h"
 #include "dv/DVSprite.h"
 #include "sb/SBDrawManager.h"
 #include "sb/SBFile.h"
+#include "sb/SBSound.h"
 
 static std::string findGameFolder(int argc, char** argv) {
     std::vector<std::string> tries;
@@ -48,6 +54,33 @@ struct Touch {
     Uint32 t0;      // when
 };
 
+// ---- the voices (SBSound): a WAV at a time, on its own audio device -------------------------------
+static SDL_AudioDeviceID gVoiceDev = 0;
+static void StopVoice() {
+    if (gVoiceDev) {
+        SDL_CloseAudioDevice(gVoiceDev);
+        gVoiceDev = 0;
+    }
+}
+static void PlayVoice(const std::string& path) {
+    StopVoice();
+    SDL_AudioSpec spec;
+    Uint8* buf = nullptr;
+    Uint32 len = 0;
+    if (!SDL_LoadWAV(path.c_str(), &spec, &buf, &len)) {
+        SBLog("voice %s: %s", path.c_str(), SDL_GetError());
+        return;
+    }
+    gVoiceDev = SDL_OpenAudioDevice(nullptr, 0, &spec, nullptr, 0);
+    if (gVoiceDev) {
+        SDL_QueueAudio(gVoiceDev, buf, len);
+        SDL_PauseAudioDevice(gVoiceDev, 0);
+    } else {
+        SBLog("audio: %s", SDL_GetError());
+    }
+    SDL_FreeWAV(buf);
+}
+
 // the app's own buttons (until the game's interface comes)
 struct UIButton {
     float x, y, w, h;
@@ -62,7 +95,7 @@ static bool gAimMode = false;
 static std::vector<UIButton> layoutButtons(DVEngine* engine, int sw, int sh) {
     std::vector<UIButton> b;
     if (!engine) return b;
-    if (engine->missionFailed) return b;
+    if (engine->missionFailed || engine->missionResult || engine->briefing) return b;
     float bh = sh * 0.085f, bw = sh * 0.24f, gap = sh * 0.015f;
     float y = sh * 0.16f;
     const auto& heroes = engine->Heroes();
@@ -96,7 +129,7 @@ int main(int argc, char** argv) {
     SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
     SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
     SDL_SetHint(SDL_HINT_MOUSE_TOUCH_EVENTS, "0");
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) != 0) {
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_AUDIO) != 0 && SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) != 0) {
         SBLog("SDL_Init: %s", SDL_GetError());
         return 1;
     }
@@ -112,6 +145,8 @@ int main(int argc, char** argv) {
 #ifdef __ANDROID__
     flags |= SDL_WINDOW_FULLSCREEN;
 #endif
+    SBSound::playVoice = PlayVoice;
+    SBSound::stopVoice = StopVoice;
     SDL_Window* window = SDL_CreateWindow("Desperados", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1280, 720, flags);
     if (!window) {
         SBLog("SDL_CreateWindow: %s", SDL_GetError());
@@ -128,6 +163,8 @@ int main(int argc, char** argv) {
 
     Overlay overlay;
     overlay.Init();
+    GameUI ui;
+    bool uiReady = false;
     if (game.empty()) {
         // no game files: say where they go
         bool run = true;
@@ -184,9 +221,16 @@ int main(int argc, char** argv) {
         cam.x = engine->camera.x;
         cam.y = engine->camera.y;
         cam.Stop();
+        engine->cameraMoved = false;
         levelIndex = i;
+        ui.showObjectives = false;
+        if (!uiReady) uiReady = ui.Init() || true;
     };
-    if (!levels.empty()) loadLevel(0);
+    size_t first = 0;
+#ifndef __ANDROID__
+    if (const char* l = getenv("DVLEVEL")) first = (size_t)std::max(0, atoi(l) - 1) % std::max<size_t>(1, levels.size());
+#endif
+    if (!levels.empty()) loadLevel(first);
 
     std::vector<Touch> touches;
     bool tapPossible = false;
@@ -195,12 +239,26 @@ int main(int argc, char** argv) {
     // a tap on the map: a hero selects him; the ground orders the selected hero there; a second tap
     // at the same place soon after makes him run (DVEngine::ManageInputProcessLeftDoubleClick)
     auto onTap = [&](const SBGeoPoint2D& mp, float sx, float sy) {
+        if (engine->missionResult == 1) {
+            // the next mission
+            gAimMode = false;
+            StopVoice();
+            loadLevel((levelIndex + 1) % levels.size());
+            return;
+        }
         if (engine->missionFailed) {
             // the mission again
             gAimMode = false;
+            StopVoice();
             loadLevel(levelIndex);
             return;
         }
+        // a dialogue in a cut scene: the next line (DVDialogue::ProcessInput)
+        if (engine->dialogue && engine->dialogue->Playing() && (engine->briefing || engine->userLocked)) {
+            engine->dialogue->Skip();
+            return;
+        }
+        if (engine->briefing) return;
         float slack = 6.0f;
         if (DVElementActor* h = engine->HeroAt(mp, slack)) {
             if (h != engine->Selected()) {
@@ -229,6 +287,16 @@ int main(int argc, char** argv) {
     };
     // the app's buttons: true if (x, y) was on one
     auto pressButton = [&](float x, float y) -> bool {
+        int g = ui.HitButton(x, y, engine.get(), sw, sh);
+        if (g == 1) {
+            StopVoice();
+            engine->SkipBriefing();
+            return true;
+        }
+        if (g == 2) {
+            ui.showObjectives = !ui.showObjectives;
+            return true;
+        }
         std::vector<UIButton> bs = layoutButtons(engine.get(), sw, sh);
         const UIButton* b = hitButton(bs, x, y);
         if (!b) return false;
@@ -281,6 +349,7 @@ int main(int argc, char** argv) {
             case SDL_FINGERDOWN: {
                 float x = ev.tfinger.x * sw, y = ev.tfinger.y * sh;
                 int button = overlay.HitButton(x, y, sw, sh);
+                if (engine && (engine->briefing || engine->dialogue->Playing())) button = 0;
                 if (touches.empty() && button != 0 && !levels.empty()) {
                     if (button > 0) loadLevel((levelIndex + 1) % levels.size());
                     else loadLevel((levelIndex + levels.size() - 1) % levels.size());
@@ -423,6 +492,39 @@ int main(int argc, char** argv) {
                 ++steps;
             }
             if (tickAcc > 0.04) tickAcc = 0;
+            // the scripts moved the camera / asked for a zoom (2 near, 1, 0.5 far)
+            if (engine->zoomWanted > 0) {
+                float cx = cam.x + cam.ViewW(sw, sh) * 0.5f, cy = cam.y + cam.viewH * 0.5f;
+                cam.viewH = std::max(cam.minViewH, std::min(cam.maxViewH, 640.0f / engine->zoomWanted));
+                cam.x = cx - cam.ViewW(sw, sh) * 0.5f;
+                cam.y = cy - cam.viewH * 0.5f;
+                engine->zoomWanted = -1;
+            }
+            // the cut scenes were framed for the original's 768 lines: the view is at least that
+            // tall while they play, and the player's zoom comes back after
+            static float savedViewH = 0;
+            if (engine->briefing && savedViewH == 0) {
+                savedViewH = cam.viewH;
+                if (cam.viewH < 768) {
+                    float cx = cam.x + cam.ViewW(sw, sh) * 0.5f, cy = cam.y + cam.viewH * 0.5f;
+                    cam.viewH = 768;
+                    cam.x = cx - cam.ViewW(sw, sh) * 0.5f;
+                    cam.y = cy - cam.viewH * 0.5f;
+                    engine->screen = SBGeoVector2D(cam.ViewW(sw, sh), cam.viewH);
+                }
+            } else if (!engine->briefing && savedViewH > 0) {
+                float cx = cam.x + cam.ViewW(sw, sh) * 0.5f, cy = cam.y + cam.viewH * 0.5f;
+                cam.viewH = savedViewH;
+                cam.x = cx - cam.ViewW(sw, sh) * 0.5f;
+                cam.y = cy - cam.viewH * 0.5f;
+                savedViewH = 0;
+            }
+            if (engine->cameraMoved) {
+                cam.x = engine->camera.x;
+                cam.y = engine->camera.y;
+                cam.Stop();
+                engine->cameraMoved = false;
+            }
             engine->camera = SBGeoPoint2D(std::floor(cam.x), std::floor(cam.y));
             engine->Draw();
             draw.Finish();
@@ -440,23 +542,45 @@ int main(int argc, char** argv) {
             overlay.Picture(draw.ScreenTexture(), draw.ScreenWidth(), draw.ScreenHeight(), -fx * s, -fy * s,
                             draw.ScreenWidth() * s, draw.ScreenHeight() * s);
         }
-        overlay.LevelBar(levelIndex + 1, levels.size(), sw, sh);
+        if (!engine || (!engine->briefing && !engine->dialogue->Playing())) overlay.LevelBar(levelIndex + 1, levels.size(), sw, sh);
+        if (engine) ui.Draw(overlay, engine.get(), sw, sh);
         for (const UIButton& b : layoutButtons(engine.get(), sw, sh)) {
             overlay.Rect(b.x, b.y, b.w, b.h, b.on ? 0.25f : 0.0f, b.on ? 0.35f : 0.0f, 0.0f, 0.55f);
             overlay.Text(b.label.c_str(), b.x + b.w * 0.5f, b.y + b.h * 0.5f, b.h * 0.32f, true);
         }
         if (!loadError.empty()) overlay.Text(loadError.c_str(), sw * 0.5f, sh * 0.5f, sh * 0.04f, true);
-        if (engine && engine->missionFailed) {
+        if (engine && engine->missionFailed && engine->missionResult == 0) {
             std::string who = engine->deadHero ? engine->deadHero->KindName() : "A HERO";
             for (char& c : who) c = (char)toupper((unsigned char)c);
             overlay.Rect(0, sh * 0.38f, (float)sw, sh * 0.24f, 0.25f, 0.0f, 0.0f, 0.6f);
             overlay.Text((who + " IS DEAD - MISSION FAILED").c_str(), sw * 0.5f, sh * 0.46f, sh * 0.05f, true);
             overlay.Text("TAP TO TRY AGAIN", sw * 0.5f, sh * 0.54f, sh * 0.035f, true);
         }
+#ifndef __ANDROID__
+        // desktop check: DVSHOT=seconds,picture.ppm[,level] writes the window after that long and quits
+        if (const char* shot = getenv("DVSHOT")) {
+            static Uint32 start = SDL_GetTicks();
+            float secs = (float)atof(shot);
+            if (SDL_GetTicks() - start > (Uint32)(secs * 1000)) {
+                std::vector<unsigned char> px((size_t)sw * sh * 4);
+                glReadPixels(0, 0, sw, sh, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+                const char* name = strchr(shot, ',');
+                if (FILE* f = fopen(name ? name + 1 : "shot.ppm", "wb")) {
+                    fprintf(f, "P6\n%d %d\n255\n", sw, sh);
+                    for (int y = sh - 1; y >= 0; --y)
+                        for (int x = 0; x < sw; ++x) fwrite(&px[((size_t)y * sw + x) * 4], 1, 3, f);
+                    fclose(f);
+                }
+                run = false;
+            }
+        }
+#endif
         SDL_GL_SwapWindow(window);
     }
+    StopVoice();
     engine.reset();
     draw.CloseScreen();
+    ui.Shutdown();
     overlay.Shutdown();
     SDL_GL_DeleteContext(ctx);
     SDL_DestroyWindow(window);

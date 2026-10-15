@@ -16,6 +16,7 @@
 class SBFile;
 class DVPatch;
 class DVArtificialIntelligence;
+class DVSequenceElement;
 
 // the element kinds in the ELEM hunk (DVEngine::LoadElemFromFile)
 enum : uint16_t {
@@ -68,6 +69,9 @@ struct DVOrder {
     SBGeoPoint3D aim;                   // +8 (where to shoot)
     uint16_t damage = 0;                // a bullet's hit (the sequence element's +0x16)
     class DVElement* from = nullptr;    // ... and who shot it (+0x2c)
+    uint32_t anim = 0;                  // a script's animation (the sequence element's +0x20)
+    class DVDoor* door = nullptr;       // the door passed at the end of this order (position +0xec)
+    bool enter = false;                 // ... from its first side (+0xf0)
     static uint32_t NewID();
 };
 
@@ -122,6 +126,14 @@ enum : uint32_t {
     CMD_DEAD_KNOCKED = 0xd3,
     CMD_RELOAD = 0xe1,   // the engine's own: wait while reloading
     CMD_TURN = 0xe0,     // turn on the spot (the sequence's 0x1d)
+    CMD_LEAVE = 0xe8,    // the engine's own: leave the map at the end of a script's walk (0x1a)
+    CMD_PUNCH = 0xe9,    // a punch (DVElementActorHuman::Execute 0xe9: animation 0x24)
+    CMD_PUNCH_ANIM = 0x24,
+    CMD_SCRIPT_ANIM = 0xea,    // a script's animation, once (the sequence's 0x20)
+    CMD_SCRIPT_LOOP = 0xeb,    // ... looped (0x21)
+    CMD_SCRIPT_FREEZE = 0xec,  // ... stopping on its last frame (0x22)
+    CMD_MOVE_ANIM = 0xee,      // the engine's own: a move with o.anim (doors, lifts)
+    CMD_TELEPORT = 0xef,       // the engine's own: put there (inside a house: to the next door)
     CMD_NONE = 0xbb,
 };
 
@@ -151,16 +163,41 @@ public:
     bool selected = false;
     bool playable = true;       // +0xb5 (DVScript::Deactivate: a hero the player can't use yet)
     bool animalLocked = false;  // +0x139 (DVScript::LockAI for the animals)
+    bool actionAvailable[6] = {true, true, true, true, true, true};  // PC +0x1a3 (the scripts' ISetActionAvailable)
     int selectionPulse = 0;     // +0x188 ticks left of the selection flash
     int selectionPulseLen = 0;  // +0x18c
 
     std::deque<DVOrder> orders;     // the current sequence element's orders
+    // ---- the scripts' sequences (DVElementActor::Instruct) -------------------------------------
+    DVSequenceElement* scriptElement = nullptr;  // +0xb8 the script's element being done
+    uint32_t defaultAnim = 0;       // +0xd0 the animation of a frozen / looped default (0xec)
+    bool defaultLoop = false;
+    // DVElementActor::Instruct (0x0820d540) and Translate: the element becomes orders
+    void Instruct(DVSequenceElement* e);
+    // DVElementActor[Human/NPC/PC]::ExecuteImmediately: the elements done at once
+    void ExecuteImmediately(DVSequenceElement* e);
+    // the script's element is over (done, or replaced by other orders)
+    void EndScriptElement(bool done);
+    // DVScript::SetActorLocation: put him there at once
+    void Teleport(const SBGeoPoint2D& p, uint16_t layer, class DVSector* area);
     uint32_t defaultCommand = CMD_NONE;  // +0xcc
     uint32_t actionState = 0;            // +0xc4
     bool newOrder = false;               // +200
     void SetStates(uint32_t posture, uint32_t state);
     void SetDefaultWaitAction();
-    bool BuildMove(const SBGeoPoint2D& goal, uint32_t command, uint32_t movePosture, std::deque<DVOrder>& out) const;
+    // the orders of a move to `goal` on `goalArea` (nullptr: the area under the goal, his own if
+    // none): the walks, and the doors and lifts on the way (DVSequence::AppendMoveToSequence)
+    bool BuildMove(const SBGeoPoint2D& goal, uint32_t command, uint32_t movePosture, std::deque<DVOrder>& out,
+                   class DVSectorMotionArea* goalArea = nullptr) const;
+    // a walk inside one area (DVPathFinder::FindPath)
+    bool BuildMoveInArea(const SBGeoPoint2D& start, class DVSectorMotionArea* area, uint16_t layer,
+                         const SBGeoPoint2D& goal, uint32_t command, uint32_t movePosture, bool fromHere,
+                         std::deque<DVOrder>& out) const;
+    // the area he stands on (a walkable area, a lift or a house), his house if he is in one
+    class DVSectorMotionArea* Area() const;
+    class DVSectorBuilding* Building() const;
+    bool InBuilding() const { return Building() != nullptr; }
+    void PassDoor(class DVDoor* d, bool enter);   // 0x0820f7e0
     uint32_t profile = 0;       // PC: +0x2b8
 
     // ---- the NPCs (DVElementActorNPC) ---------------------------------------------------------------
@@ -174,6 +211,11 @@ public:
     bool knockedOut = false;       // +0x12e
     int16_t life = 0x29a;          // +0x130 (DVElementActorHuman: 666; heroes 100; villains their energy)
     DVElement* horse = nullptr;    // +0x134
+    // a prisoner (+0x9d) and the villain who holds him at gunpoint (+0xa0)
+    DVElementActor* menacer = nullptr;
+    bool IsHeldPrisoner() const {
+        return menacer && !menacer->dead && !menacer->knockedOut && menacer->active;
+    }
     bool isMove = false;           // the current sequence is a walk (DVSequenceElement 0x17)
     uint8_t frameOffset = 0;       // +0x23c (spreads The16thFrame over the frames)
     uint32_t CurrentCommand() const;   // +0xbc ? order : default command
@@ -206,6 +248,8 @@ public:
     // IsDetecting(DVElementActorHuman*, ...) (0x082323e0): 0 not seen, 1 seen, 2 seen near enough
     // to be identified; `speed` how fast the suspicion grows
     uint8_t DetectHero(const DVElementActor* hero, uint16_t& speed) const;
+    bool IsObviouslyHostile() const;   // DVElementActorPC (0x08247ea0)
+    int32_t ShadowZone() const;        // DVElementActorHuman::GetShadowZone (0x08229280)
     void RefreshDetection();           // 0x0822eae0 (the heroes' part)
     bool detecting = false;            // +0x23f a stimulus was just sent: the cone flashes white
     void ResetDazzlingImmunity() {}    // 0x0823acf0 (the mirror's blinding comes with the fights)
@@ -231,6 +275,14 @@ public:
     bool ShootSingleBullet(const SBGeoPoint3D& at, const struct DVFirearm* w, bool special, bool place);
     // DVElementActorHuman::Translate 0x2f: a bullet hits; the hit or the death is played
     void GotBullet(uint16_t damage, DVElement* shooter);
+    // DVElementActorHuman::Translate 0x2d / 0x30: a blow (a punch): the life it takes, then he
+    // falls (0x20) or dies (0x21); GotHit (0x08238210 / 0x08247420) adds to the concussion
+    void KnockHit(uint16_t damage, DVElement* from);
+    void GotHit(uint16_t damage, DVElement* from);
+    // DVElementActorHuman::SetConcussionOfTheBrain (0x0821bf00): over 0x45 he is out cold, under
+    // 0x1e he comes to; it goes down with the time (DVElementActorHuman::Hourglass)
+    void SetConcussion(int v);
+    uint16_t concussion = 0;          // +300
     void Kill();                                        // DVElementActorPC / NPC / NPCVillain::Kill
     // the orders of a shot at someone (DVElementActorHuman::Translate 0x32)
     bool OrderShoot(DVElement* target);
@@ -261,7 +313,12 @@ public:
 
 class DVElementTarget : public DVElementFX {
 public:
+    DVElementTarget() { classFlags = 8; }
     int LoadStateFromFile(SBFile& f) override;
     void Hourglass() override;
-    uint32_t value144 = 0;
+    // DVElementTarget::Instruct (0x08265de0): the scripts' animations (0x20 once, 0x22 frozen)
+    void Instruct(class DVSequenceElement* e);
+    uint32_t value144 = 0;     // +0x144 what the script hears of (1 stabbed, 2 dagger, 4 shot)
+    uint32_t animation = 0;    // +0x13c
+    int progression = 0;       // +0x140
 };

@@ -3,12 +3,15 @@
 // DVElementActorPC / NPC / NPCVillain), and the noises the shots make (DVElementActorNPC::Noise).
 #include <algorithm>
 #include <cmath>
+#include <string>
 
 #include "dv/DVArmsTrader.h"
 #include "dv/DVArtificialIntelligence.h"
 #include "dv/DVElement.h"
 #include "dv/DVEngine.h"
 #include "dv/DVFastFindGrid.h"
+#include "dv/DVScript.h"
+#include "dv/DVSequence.h"
 #include "dv/DVSprite.h"
 #include "sb/SBFile.h"
 
@@ -136,6 +139,7 @@ bool DVElementActor::ShootSingleBullet(const SBGeoPoint3D& at, const DVFirearm* 
 }
 
 bool DVElementActor::Shoot(DVElement* t, const DVFirearm* w, bool special) {
+    if (DVSequenceManager::trace) SBLog("%s #%d (out %d, state %u/%u, locked %d) shoots at %s #%d", KindName(), DVScript::Handle(this), knockedOut, ai ? ai->state : 0, ai ? ai->substate : 0, ai && ai->locked, t ? t->KindName() : "-", DVScript::Handle(t));
     if (!w || !t || !t->sprite) return false;
     SBGeoPoint3D from = FirearmPoint();
     DVElementActor* target = dynamic_cast<DVElementActor*>(t);
@@ -203,7 +207,7 @@ void DVElementActor::GotBullet(uint16_t damage, DVElement* shooter) {
         if (damage >= (uint16_t)std::max<int16_t>(life, 0)) life = 0;
         else life = (int16_t)(life - damage);
     }
-    SBLog("%s hit (%u): life %d", KindName(), damage, life);
+    SBLog("%s hit (%u) by %s at %.0f,%.0f: life %d", KindName(), damage, shooter ? (std::string(shooter->KindName()) + " #" + std::to_string(DVScript::Handle(shooter)) + (dynamic_cast<DVElementActor*>(shooter) && dynamic_cast<DVElementActor*>(shooter)->ai && dynamic_cast<DVElementActor*>(shooter)->ai->locked ? " locked" : "")).c_str() : "-", shooter && shooter->sprite ? shooter->sprite->pos.posMap.x : 0.f, shooter && shooter->sprite ? shooter->sprite->pos.posMap.y : 0.f, life);
     DVOrder o;
     o.id = DVOrder::NewID();
     uint32_t p = pos.posture;
@@ -280,4 +284,92 @@ void DVElementActor::Reload() {
     orders.push_back(o);
     newOrder = true;
     isMove = false;
+}
+
+// ---- blows ---------------------------------------------------------------------------------------
+
+void DVElementActor::SetConcussion(int v) {
+    bool was = knockedOut;
+    if (v < 0) v = 0;
+    if (v > 300) v = 300;
+    concussion = (uint16_t)v;
+    if (!was) {
+        if (v > 0x45) knockedOut = true;
+    } else if (v < 0x1e) {
+        knockedOut = false;
+    }
+    if (was == knockedOut) return;
+    if (knockedOut) {
+        SBLog("%s is out cold", KindName());
+        if (IsHero()) {
+            // DVElementActorPC::SetConcussionOfTheBrain: he can't be used while out
+            DVEngine* e = DVEngine::mpEngine;
+            if (e && e->Selected() == this) e->SelectNextPlayable();
+        }
+    } else {
+        SBLog("%s comes to", KindName());
+        if (IsHero()) {
+            defaultCommand = CMD_LYING;
+        } else if (ai && ai->substate == 2) {
+            DVStimulus s = DVStimulus::Of(0xf);
+            ai->Think(s);
+        }
+    }
+}
+
+void DVElementActor::GotHit(uint16_t damage, DVElement* from) {
+    bool was = knockedOut;
+    int add = (int)((uint32_t)damage * 1000 / (uint32_t)std::max(1, (int)life + (int)damage));
+    SetConcussion(concussion + add);
+    if (!ai) return;
+    if (!was && knockedOut) {
+        DVStimulus s = DVStimulus::Of(0x11);
+        ai->Think(s);
+        detecting = true;
+        return;
+    }
+    ai->target = from && (from->classFlags & 3) != 1 ? from : nullptr;
+    DVStimulus s = DVStimulus::Of(0x10);
+    ai->Think(s);
+}
+
+void DVElementActor::KnockHit(uint16_t damage, DVElement* from) {
+    if (dead || !active) return;
+    DVPositionInterface& pos = sprite->pos;
+    DVEngine* e = DVEngine::mpEngine;
+    bool immortal = IsHero() && e && e->highlander;
+    if (!immortal) life = damage >= std::max<int16_t>(life, 0) ? 0 : (int16_t)(life - damage);
+    SBLog("%s punched (%u) by %s: life %d", KindName(), damage, from ? from->KindName() : "-", life);
+    if (from && from->sprite) {
+        SBGeoVector2D d = from->sprite->pos.posMap - pos.posMap;
+        if (d.x != 0.0f || d.y != 0.0f) pos.directionWanted = (uint16_t)(SBGetSector0to15(d, 1.0f) & 0xf);
+    }
+    uint32_t p = pos.posture;
+    if (p == POSTURE_LYING) {
+        if (life < 1) {
+            dead = true;
+            Kill();
+            pos.SetPosture(0xe);
+        } else {
+            GotHit(damage, from);
+        }
+        return;
+    }
+    DVOrder o;
+    o.id = DVOrder::NewID();
+    o.command = life < 1 ? CMD_DIE : CMD_KNOCKED;
+    o.target = from;
+    if (!sprite->HasAnimation(o.command)) o.command = CMD_WAIT;
+    if (e) e->Noise(0x14, pos.pos3D, this);
+    if (scriptElement) EndScriptElement(false);
+    orders.clear();
+    orders.push_back(o);
+    newOrder = true;
+    isMove = false;
+    if (life < 1) {
+        dead = true;
+        Kill();
+    } else {
+        GotHit(damage, from);
+    }
 }

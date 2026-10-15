@@ -3,6 +3,7 @@
 // and the drawing of its current frame into its element's surface, with the masks of the
 // background that stand in front of it (CreateTargetSprite / DrawMaskOverSprite).
 #pragma once
+#include <utility>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -72,6 +73,11 @@ public:
 
     // ---- actions and motions (one call per 25 Hz tick). Results: 1 = started, 2 = going on,
     // 0 = the row's action frame reached, 3 = finished, 4 = error.
+    // DVSprite::SwitchAlternateProfile (0x0839a3d0): the other costume (Kate's dress)
+    void SwitchAlternateProfile() {
+        useAlt = !useAlt;
+        std::swap(animRows, animRowsAlt);
+    }
     bool HasAnimation(uint32_t anim) const { return anim < animRows.size() && animRows[anim] != -1; }
     bool MaybeInitializeFrame(uint32_t anim, int progression);
     void InitializeActionDone(uint32_t anim);

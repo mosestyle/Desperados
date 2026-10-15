@@ -127,6 +127,11 @@ public:
     // scripts stop the brain (the stimuli are dropped, or kept when `keep`) and start it again
     void ScriptLockAI(bool keep);
     void ScriptUnlockAI();
+    // AssignNewPatrolPath (0x081b0e90): a new route (0xffff none, 0xfffe none and stay) /
+    // AssignNewPost (0x081b11f0): a new post; the brain goes there when it is calm
+    bool AssignNewPatrolPath(uint16_t path);
+    bool AssignNewPost(const DVposition& p, uint8_t dir);
+    bool scripted = false;               // +0x3f8 the NPC has a script (FilterEvent)
     bool locked = false;                 // +0x3b8
     bool lockKeep = false;               // +0x3b9
 
@@ -178,6 +183,7 @@ public:
     uint32_t savedViewCone = 0;          // +0x47c
 
     static uint32_t* mpUniversalFrameCounter;
+    static bool mbFreeze;                 // DVScript::FreezeAll: the brains stop thinking
     static uint16_t muwStandardViewPolygonRadius;
     static uint32_t mCurrentOverallAlertStatus;         // the highest level of all the NPCs
     static uint32_t mCurrentOverallVillainAlertStatus;  // of the villains

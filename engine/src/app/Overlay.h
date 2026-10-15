@@ -12,6 +12,9 @@ public:
     // a texture (rows top to bottom) drawn at x, y (top-left, pixels), w x h
     void Picture(GLuint tex, int texW, int texH, float x, float y, float w, float h);
     void Rect(float x, float y, float w, float h, float r, float g, float b, float a);
+    // a part (u0, v0)-(u1, v1) of a texture, tinted
+    void Tex(GLuint tex, float u0, float v0, float u1, float v1, float x, float y, float w, float h, float r = 1,
+             float g = 1, float b = 1, float a = 1);
     void Text(const char* s, float x, float y, float size, bool centred);
     void LevelBar(size_t level, size_t count, int screenW, int screenH);
     // the mission bar's arrows: -1 previous, +1 next, 0 none

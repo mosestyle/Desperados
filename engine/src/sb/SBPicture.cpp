@@ -38,6 +38,25 @@ bool SBPictureSixteen::LoadFromStream(SBFile& f) {
     return true;
 }
 
+bool SBPictureSixteen::LoadFromMemory(const uint8_t* p, size_t n, size_t& used) {
+    used = 0;
+    if (n < 12) return false;
+    uint32_t codec, size;
+    memcpy(&width, p, 2);
+    memcpy(&height, p + 2, 2);
+    memcpy(&codec, p + 4, 4);
+    memcpy(&size, p + 8, 4);
+    if (codec > 2 || 12 + (size_t)size > n) return false;
+    used = 12 + size;
+    size_t bytes = (size_t)width * height * 2;
+    pixels.assign((size_t)width * height, 0);
+    const uint8_t* d = p + 12;
+    if (codec == 0) memcpy(pixels.data(), d, size < bytes ? size : bytes);
+    else if (codec == 2) SBUncompressBzip2(d, size, (uint8_t*)pixels.data(), bytes);
+    else SBUncompressZlib(d, size, (uint8_t*)pixels.data(), bytes);
+    return true;
+}
+
 // SBPictureSixteen::LoadFromFile (0x08181e40)
 bool SBPictureSixteen::LoadFromFile(const std::string& path) {
     SBFile f;
