@@ -1,8 +1,9 @@
 // The app: window, GL context, the player's game folder, then a mission run by the engine.
 // Drag / flick / pinch move the view. Tap a hero to select him, tap the ground to walk there,
 // tap twice to run (the original's click / double click), tap an NPC to show / hide his view
-// cone. The buttons on the left select the heroes, the one on the right makes the hero lie
-// down / stand up. Arrows at the top switch between the missions.
+// cone. The buttons on the left select the heroes (with their life), the ones on the right make
+// the hero lie down / stand up and raise his gun (then a tap on an enemy shoots, a double tap on
+// the gun reloads). Arrows at the top switch between the missions.
 #include <SDL.h>
 
 #include <GLES3/gl3.h>
@@ -15,6 +16,7 @@
 
 #include "app/Camera.h"
 #include "app/Overlay.h"
+#include "dv/DVArmsTrader.h"
 #include "dv/DVElement.h"
 #include "dv/DVEngine.h"
 #include "dv/DVSprite.h"
@@ -54,21 +56,32 @@ struct UIButton {
     bool on;
 };
 
+// the gun: on, a tap on an enemy shoots at him (the original's shoot tool)
+static bool gAimMode = false;
+
 static std::vector<UIButton> layoutButtons(DVEngine* engine, int sw, int sh) {
     std::vector<UIButton> b;
     if (!engine) return b;
+    if (engine->missionFailed) return b;
     float bh = sh * 0.085f, bw = sh * 0.24f, gap = sh * 0.015f;
     float y = sh * 0.16f;
     const auto& heroes = engine->Heroes();
     for (size_t i = 0; i < heroes.size(); ++i) {
+        if (!heroes[i]->playable) continue;
         std::string name = heroes[i]->KindName();
         for (char& c : name) c = (char)toupper((unsigned char)c);
+        name += " " + std::to_string(std::max<int>(0, heroes[i]->life));
         b.push_back({gap, y, bw, bh, (int)i + 1, name, heroes[i] == engine->Selected()});
         y += bh + gap;
     }
     if (engine->Selected()) {
         bool lying = engine->Selected()->Posture() == POSTURE_LYING;
         b.push_back({sw - bw - gap, sh * 0.5f - bh * 0.5f, bw, bh, 100, lying ? "STAND UP" : "GET DOWN", lying});
+        DVElementActor* h = engine->Selected();
+        if (h->firearm) {
+            std::string g = "GUN " + std::to_string(std::max<int>(0, h->ammo)) + "/" + std::to_string(h->firearm->magazine);
+            b.push_back({sw - bw - gap, sh * 0.5f - bh * 1.5f - gap, bw, bh, 101, g, gAimMode});
+        }
     }
     return b;
 }
@@ -182,6 +195,12 @@ int main(int argc, char** argv) {
     // a tap on the map: a hero selects him; the ground orders the selected hero there; a second tap
     // at the same place soon after makes him run (DVEngine::ManageInputProcessLeftDoubleClick)
     auto onTap = [&](const SBGeoPoint2D& mp, float sx, float sy) {
+        if (engine->missionFailed) {
+            // the mission again
+            gAimMode = false;
+            loadLevel(levelIndex);
+            return;
+        }
         float slack = 6.0f;
         if (DVElementActor* h = engine->HeroAt(mp, slack)) {
             if (h != engine->Selected()) {
@@ -189,9 +208,11 @@ int main(int argc, char** argv) {
                 return;
             }
         }
-        // an enemy or a civilian: show / hide his view cone (the original's "watch" tool)
+        // an enemy or a civilian: with the gun up, shoot at him; else show / hide his view cone
+        // (the original's "watch" tool)
         if (DVElementActor* n = engine->NPCAt(mp, slack)) {
-            engine->ToggleWatched(n);
+            if (gAimMode && !n->dead) engine->OrderShoot(n);
+            else engine->ToggleWatched(n);
             return;
         }
         Uint32 now = SDL_GetTicks();
@@ -223,6 +244,18 @@ int main(int argc, char** argv) {
             lastHeroTap = SDL_GetTicks();
         } else if (b->action == 100) {
             engine->OrderCrouch();
+        } else if (b->action == 101) {
+            // the gun: a tap raises / lowers it, a double tap reloads
+            static Uint32 lastGun = 0;
+            Uint32 now = SDL_GetTicks();
+            if (now - lastGun < 400) {
+                engine->OrderReload();
+                gAimMode = true;
+                lastGun = 0;
+            } else {
+                gAimMode = !gAimMode;
+                lastGun = now;
+            }
         }
         return true;
     };
@@ -413,6 +446,13 @@ int main(int argc, char** argv) {
             overlay.Text(b.label.c_str(), b.x + b.w * 0.5f, b.y + b.h * 0.5f, b.h * 0.32f, true);
         }
         if (!loadError.empty()) overlay.Text(loadError.c_str(), sw * 0.5f, sh * 0.5f, sh * 0.04f, true);
+        if (engine && engine->missionFailed) {
+            std::string who = engine->deadHero ? engine->deadHero->KindName() : "A HERO";
+            for (char& c : who) c = (char)toupper((unsigned char)c);
+            overlay.Rect(0, sh * 0.38f, (float)sw, sh * 0.24f, 0.25f, 0.0f, 0.0f, 0.6f);
+            overlay.Text((who + " IS DEAD - MISSION FAILED").c_str(), sw * 0.5f, sh * 0.46f, sh * 0.05f, true);
+            overlay.Text("TAP TO TRY AGAIN", sw * 0.5f, sh * 0.54f, sh * 0.035f, true);
+        }
         SDL_GL_SwapWindow(window);
     }
     engine.reset();

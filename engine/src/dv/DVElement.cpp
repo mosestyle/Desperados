@@ -1,5 +1,7 @@
 #include "dv/DVElement.h"
 
+#include "dv/DVArmsTrader.h"
+
 #include <cmath>
 #include <cstdlib>
 
@@ -379,6 +381,16 @@ bool DVElementActor::StepOrders() {
         if (defaultCommand == CMD_NONE) SetDefaultWaitAction();
         if (defaultCommand == CMD_LYING) {
             s->PerformAction(0, CMD_LYING, 0xb, false);
+        } else if (defaultCommand == CMD_DEAD) {
+            // DVElementActorHuman::Execute 0xd2: the death's last frame
+            s->PerformAction(0, CMD_DIE, 0xc, false);
+        } else if (defaultCommand == CMD_DEAD_KNOCKED) {
+            pos.direction ^= 8;
+            s->PerformAction(0, CMD_KNOCKED, 0xc, false);
+            pos.direction ^= 8;
+        } else if (defaultCommand == CMD_SHOOT || defaultCommand == CMD_SHOOT_LYING) {
+            // after a shot the gun stays up (Execute 0x1c without an order)
+            s->PerformAction(0, defaultCommand, 0xb, false);
         } else if (defaultCommand != CMD_WAIT && s->HasAnimation(defaultCommand)) {
             // DVElementActor::SetInitialAnimation's idle animations (sitting, sleeping, ...)
             s->PerformAction(0, defaultCommand, 0xc, false);
@@ -431,6 +443,54 @@ bool DVElementActor::StepOrders() {
         if (r == 1) SetStates(POSTURE_GETTING_UP, 0);
         else if (r == 3) SetStates(POSTURE_STANDING, 0);
         break;
+    case CMD_SHOOT:
+    case CMD_SHOOT_LYING: {
+        // DVElementActorHuman::Execute 0x1c / 8: turn to the target, the shot at the animation's
+        // "action" frame
+        if (first) {
+            if (IsHero() && ammo < 1) {
+                SBLog("%s: no bullets left (double-tap the gun to reload)", KindName());
+                r = 3;
+                break;
+            }
+            SetStates(pos.posture == POSTURE_LYING ? POSTURE_LYING : POSTURE_STANDING, 0);
+        }
+        if (o.target && o.target->sprite) o.aim = o.target->sprite->pos.pos3D;
+        SBGeoVector2D d(o.aim.x - pos.pos3D.x, o.aim.y - pos.pos3D.y);
+        if (d.x != 0.0f || d.y != 0.0f) pos.directionWanted = (uint16_t)(SBGetSector0to15(d, 1.0f) & 0xf);
+        pos.TurnFast();
+        r = s->PerformAction(o.id, o.command, 0, false);
+        if (r == 3) {
+            SetStates(pos.posture == POSTURE_LYING ? POSTURE_LYING : POSTURE_STANDING, 4);
+        } else if (r == 0 && firearm) {
+            if (o.target) Shoot(o.target, firearm, false);
+            else
+                for (uint16_t i = 0; i < firearm->bullets; ++i) ShootSingleBullet(o.aim, firearm, false, true);
+            ammo = (int16_t)(ammo - 1);
+            // the shot's noise: a villain's 2, a hero's 0
+            if (DVEngine* e = DVEngine::mpEngine) e->Noise(IsHero() ? 0 : 2, pos.pos3D, this);
+        }
+        break;
+    }
+    case CMD_HIT:
+    case CMD_HIT_LYING:
+        r = s->PerformAction(o.id, o.command, 0, false);
+        if (r == 1) SetStates(o.command == CMD_HIT ? POSTURE_STANDING : POSTURE_LYING, 0);
+        break;
+    case CMD_DIE:
+        r = s->PerformAction(o.id, CMD_DIE, 0, false);
+        if (r == 3) {
+            pos.SetPosture(0xe);
+            actionState = 0;
+        }
+        break;
+    case CMD_RELOAD:
+        if (first) o.tolerance = 30.0f;
+        s->PerformAction(o.id, pos.posture == POSTURE_LYING ? CMD_LYING : CMD_WAIT, 0xb, false);
+        o.tolerance -= 1.0f;
+        r = o.tolerance <= 0.0f ? 3 : 2;
+        if (r == 3 && firearm) ammo = (int16_t)firearm->magazine;
+        break;
     case CMD_TURN:
         // DVElementActor::Translate 0x1d sets the wanted direction; Execute 0xe0 turns two
         // sixteenths a tick, stepping on the spot (the walk animation)
@@ -460,10 +520,13 @@ bool DVElementActor::StepOrders() {
     }
     bool ended = false;
     if (r == 3 || r == 4) {
+        uint32_t done = o.command;
         orders.pop_front();
         newOrder = true;
         if (orders.empty()) {
             defaultCommand = IsNPC() ? CMD_WAIT : CMD_NONE;
+            if (done == CMD_DIE) defaultCommand = CMD_DEAD;
+            else if (done == CMD_SHOOT || done == CMD_SHOOT_LYING) defaultCommand = done;
             ended = true;
         }
     }
@@ -928,7 +991,7 @@ static float CommandFactor(uint32_t c) {
 uint8_t DVElementActor::DetectHero(const DVElementActor* hero, uint16_t& speed) const {
     speed = 0;
     if ((view.status | 8) == 8) return 0;
-    if (!hero || !hero->active) return 0;
+    if (!hero || !hero->active || hero->dead) return 0;
     const DVPositionInterface& hp = hero->sprite->pos;
     if (hp.layer != sprite->pos.layer) return 0;
     if (hp.posture == 3 || hp.posture == 0xe) return 0;
@@ -1153,7 +1216,7 @@ bool DVElementActor::InitState(DVArtificialIntelligence& a) {
 void DVElementActor::NPCHourglass() {
     DVArtificialIntelligence* b = ai.get();
     bool ended = StepOrders();
-    if (!b) return;
+    if (!b || dead) return;
     if (ended && isMove) {
         isMove = false;
         b->SequenceDone(true, false);

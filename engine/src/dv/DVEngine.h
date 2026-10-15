@@ -18,6 +18,9 @@ class DVFrameHolder;
 class DVPathFinder;
 class DVHikingGuide;
 class DVShadowPolygon;
+class DVArmsTrader;
+class DVScript;
+class DVPsychoanalyst;
 
 class DVEngine {
 public:
@@ -65,6 +68,7 @@ public:
     const std::vector<DVElementActor*>& Heroes() const { return heroes; }
     DVElementActor* Selected() const { return selected; }
     void Select(DVElementActor* hero);
+    void SelectNextPlayable();   // the selected hero can't be used any more: the next one
     // the hero under a map point (DVElementActorPC::IsFocusable), the front-most one
     DVElementActor* HeroAt(const SBGeoPoint2D& p, float slack) const;
     // orders for the selected hero (left click / double click on the ground)
@@ -84,6 +88,19 @@ public:
     // shows / hides the cone of the NPC (DVEngine::ManageInputView)
     void ToggleWatched(DVElementActor* npc);
 
+    // ---- fights ---------------------------------------------------------------------------------
+    // the selected hero shoots at someone (DVEngine::ManageInputActionShoot) / reloads
+    bool OrderShoot(DVElement* target);
+    void OrderReload();
+    // DVElementActorNPC::Noise (0x08238630): who hears it thinks about it. Types: 0 a hero's
+    // shot (650), 2 / 3 a villain's (550), 0x14 a body falling (100)
+    void Noise(uint32_t type, const SBGeoPoint3D& at, DVElementActor* who);
+    // a hero is dead: the mission is lost
+    void HeroDied(DVElementActor* hero);
+    bool missionFailed = false;
+    DVElementActor* deadHero = nullptr;
+    bool highlander = false;   // the cheat: the heroes can't be killed
+
 private:
     SBDrawManager* draw;
     std::unique_ptr<DVFrameHolder> frames;  // +0x168
@@ -97,6 +114,9 @@ private:
     std::vector<DVElementActor*> npcs;      // +0xd88
     std::unique_ptr<DVHikingGuide> hiking;  // +0xe10
     std::unique_ptr<DVShadowPolygon> shadow;  // +0x90c
+    std::unique_ptr<DVScript> script;          // DVScript (the mission's scripts)
+    static std::unique_ptr<DVArmsTrader> sArms;          // DVArmsTrader::mpTheOnlyArmstraderInTown
+    static std::unique_ptr<DVPsychoanalyst> sPsy;        // DVPsychoanalyst::mpTheOnlyPsychoanalistInTown
     DVElementActor* selected = nullptr;
 
     int LoadMiscFromFile(SBFile& f);

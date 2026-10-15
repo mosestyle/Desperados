@@ -2,6 +2,8 @@
 
 #include "dv/DVArtificialIntelligence.h"
 #include "dv/DVHikingGuide.h"
+#include "dv/DVArmsTrader.h"
+#include "dv/DVScript.h"
 #include "dv/DVShadowPolygon.h"
 
 #include <algorithm>
@@ -20,8 +22,20 @@ DVEngine* DVEngine::mpEngine = nullptr;
 
 static const char* kDirLevels = "Data\\Levels";  // 0x085dd99c
 
+std::unique_ptr<DVArmsTrader> DVEngine::sArms;
+std::unique_ptr<DVPsychoanalyst> DVEngine::sPsy;
+
 DVEngine::DVEngine(SBDrawManager* d) : draw(d) {
     mpEngine = this;
+    // the weapons' and the characters' catalogues (DVGame: once, at the start)
+    if (!sArms) {
+        sArms.reset(new DVArmsTrader());
+        sArms->LoadWeaponCatalogFromFile();
+    }
+    if (!sPsy) {
+        sPsy.reset(new DVPsychoanalyst());
+        sPsy->LoadCompendiumOfPsychologyFromFile();
+    }
     frames.reset(new DVFrameHolder());
     grid.reset(new DVFastFindGrid());
     pathFinder.reset(new DVPathFinder());
@@ -116,6 +130,15 @@ bool DVEngine::LoadStateFromFile(const std::string& name) {
         }
     for (DVElementActor* a : npcs)
         if (a->ai) a->ai->InitOneAI();
+    for (DVElementActor* h : heroes) h->InitFirearm();
+    // the mission's scripts (DVScript::Initialize): StartUp and the scripted elements
+    {
+        std::vector<DVElement*> all;
+        for (auto& e : ownElements) all.push_back(e.get());
+        script.reset(new DVScript());
+        script->Initialize(this, all, levelName);
+    }
+    if (selected && !selected->playable) SelectNextPlayable();
     return background != 0;
 }
 
@@ -266,7 +289,17 @@ void DVEngine::PerformHourglass() {
     SortForEngine();
 }
 
+void DVEngine::SelectNextPlayable() {
+    for (DVElementActor* h : heroes)
+        if (h->playable && !h->dead) {
+            Select(h);
+            return;
+        }
+    Select(nullptr);
+}
+
 void DVEngine::Select(DVElementActor* h) {
+    if (h && !h->playable) return;
     for (DVElementActor* o : heroes) o->selected = false;
     selected = h;
     if (h) {
@@ -279,7 +312,7 @@ void DVEngine::Select(DVElementActor* h) {
 DVElementActor* DVEngine::HeroAt(const SBGeoPoint2D& p, float slack) const {
     DVElementActor* best = nullptr;
     for (DVElementActor* h : heroes) {
-        if (!h->active) continue;
+        if (!h->active || !h->playable) continue;
         DVSprite* s = h->sprite.get();
         SBGeoBoundingBox2D b = s->boxOnMap;
         if (!b.valid) continue;
@@ -308,8 +341,59 @@ DVElementActor* DVEngine::NPCAt(const SBGeoPoint2D& p, float slack) const {
 
 void DVEngine::ToggleWatched(DVElementActor* n) { watched = watched == n ? nullptr : n; }
 
+bool DVEngine::OrderShoot(DVElement* target) {
+    if (!selected || missionFailed) return false;
+    return selected->OrderShoot(target);
+}
+
+void DVEngine::OrderReload() {
+    if (selected && !missionFailed) selected->Reload();
+}
+
+void DVEngine::Noise(uint32_t type, const SBGeoPoint3D& at, DVElementActor* who) {
+    uint16_t radius = 0;
+    switch (type) {
+    case 0: radius = who && who->kind == KIND_KATE ? 400 : 0x28a; break;
+    case 1: case 0xb: case 0xe: case 0x10: radius = 500; break;
+    case 2: case 3: case 0xc: radius = 0x226; break;
+    case 4: case 5: radius = 0x4b0; break;
+    case 6: case 0x14: radius = 100; break;
+    case 7: radius = 800; break;
+    case 8: radius = 300; break;
+    case 9: case 0xf: case 0x11: case 0x12: radius = 200; break;
+    case 0xd: radius = 0xfa; break;
+    case 0x13: radius = 1000; break;
+    default: break;
+    }
+    if (!radius) return;
+    // DVElementActorNPC::GetHearVolume: the noise reaches as far as its radius times the
+    // level's hearing factor (the walls between and the deafness come later)
+    float reach = (float)radius * hearingFactor;
+    for (DVElementActor* n : npcs) {
+        if (!n->ai || n == who || n->dead || !n->active) continue;
+        const SBGeoPoint3D& p = n->sprite->pos.pos3D;
+        float dx = p.x - at.x, dy = (p.y - at.y) * 1.7434468f;
+        float d = std::sqrt(dx * dx + dy * dy);
+        if (d >= reach) continue;
+        DVStimulus st = DVStimulus::Of(STIM_HEAR);
+        st.point = SBGeoPoint2D(at.x, at.y - at.z);
+        st.u10 = type;
+        st.u14 = (uint16_t)(reach - d);
+        st.element = who;
+        st.source = 3;
+        n->ai->Think(st);
+    }
+}
+
+void DVEngine::HeroDied(DVElementActor* hero) {
+    if (missionFailed) return;
+    missionFailed = true;
+    deadHero = hero;
+    SBLog("%s is dead: mission failed", hero ? hero->KindName() : "a hero");
+}
+
 bool DVEngine::OrderMove(const SBGeoPoint2D& p, bool run) {
-    if (!selected) return false;
+    if (!selected || selected->dead || missionFailed) return false;
     return selected->MoveTo(p, run);
 }
 
@@ -318,7 +402,7 @@ void DVEngine::OrderMakeRunning() {
 }
 
 void DVEngine::OrderCrouch() {
-    if (!selected) return;
+    if (!selected || selected->dead || missionFailed) return;
     if (selected->Posture() == POSTURE_LYING) selected->MakeWalking();
     else selected->MakeCrawling();
 }

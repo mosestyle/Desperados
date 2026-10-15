@@ -1,7 +1,9 @@
 #include "dv/DVArtificialIntelligence.h"
 
+#include <cmath>
 #include <cstdlib>
 
+#include "dv/DVArmsTrader.h"
 #include "dv/DVElement.h"
 #include "dv/DVEngine.h"
 #include "dv/DVFastFindGrid.h"
@@ -19,6 +21,26 @@ static uint32_t Now() { return *DVArtificialIntelligence::mpUniversalFrameCounte
 static int desprand() { return std::rand() & 0x7fff; }
 
 DVArtificialIntelligence::DVArtificialIntelligence(DVElementActor* owner) : npc(owner) {}
+
+void DVArtificialIntelligence::ScriptLockAI(bool keep) {
+    locked = true;
+    lockKeep = keep;
+    if (npc->CurrentCommand() != 0xa6) npc->Stop();
+    inMacro = false;
+    npc->KillTimer(true);
+}
+
+void DVArtificialIntelligence::ScriptUnlockAI() {
+    for (uint8_t& d : detections) d = 0;
+    locked = false;
+    // the brain starts again: "back to your duty" (stimulus 0x22) unless one is waiting
+    bool waiting = false;
+    for (const DVStimulus& q : queue) waiting |= q.type == STIM_WAYPOINT_DONE;
+    if (!waiting && state != 0 && !npc->knockedOut) {
+        DVStimulus s = DVStimulus::Of(STIM_RETURN_TO_DUTY);
+        Think(s);
+    }
+}
 
 // the base SetState: the state and substate (each brain adds its own checks)
 void DVArtificialIntelligence::SetState(uint32_t s, uint32_t sub) {
@@ -40,6 +62,11 @@ DVposition DVArtificialIntelligence::Position() const {
 bool DVArtificialIntelligence::StartThink(DVStimulus& s) {
     uint32_t type = s.type;
     ++msbThinkMethodRecursionDepth;
+    // a brain the scripts locked: the stimuli wait (or are dropped) until it is unlocked
+    if (locked) {
+        if (lockKeep && type != STIM_REACHED && type != STIM_ACTION_DONE) queue.push_back(s);
+        return false;
+    }
     gotoFailed = gotoDone = false;
     previousState = state;
     uint32_t cmd = npc->CurrentCommand();
@@ -130,22 +157,32 @@ bool DVArtificialIntelligence::StartThink(DVStimulus& s) {
 // DVArtificialIntelligence::EndThink: a walk that failed or ended during the thought is thought
 // about at once
 void DVArtificialIntelligence::EndThink() {
+    // too deep (a route whose walks all fail or all end at once): back to duty, once (the
+    // original's recursion can branch twice at each level and never end)
+    static bool recovering = false;
+    auto recover = [&]() {
+        if (recovering || msbThinkMethodRecursionDepth >= 0x6f) return;
+        recovering = true;
+        ReturnToDutyStandardProcedure();
+        gotoFailed = gotoDone = false;
+        recovering = false;
+    };
     if (gotoFailed) {
         gotoFailed = false;
-        if (msbThinkMethodRecursionDepth < 100) {
+        if (msbThinkMethodRecursionDepth < 100 && !recovering) {
             DVStimulus s = DVStimulus::Of(STIM_FAILED);
             Think(s);
-        } else if (msbThinkMethodRecursionDepth < 0x6f) {
-            ReturnToDutyStandardProcedure();
+        } else {
+            recover();
         }
     }
     if (gotoDone) {
         gotoDone = false;
-        if (msbThinkMethodRecursionDepth < 100) {
+        if (msbThinkMethodRecursionDepth < 100 && !recovering) {
             DVStimulus s = DVStimulus::Of(STIM_REACHED);
             Think(s);
-        } else if (msbThinkMethodRecursionDepth < 0x6f) {
-            ReturnToDutyStandardProcedure();
+        } else {
+            recover();
         }
     }
     if (msbThinkMethodRecursionDepth) --msbThinkMethodRecursionDepth;
@@ -553,7 +590,7 @@ void DVArtificialIntelligence::SetAlertStatus(uint32_t alert, bool force) {
 
 // the brain's part of DVElementActorNPC::Hourglass: the timers and the stimuli kept for later
 void DVArtificialIntelligence::Hourglass() {
-    if (busy) return;
+    if (busy || locked) return;
     uint32_t now = Now();
     if (timerOn && (timerAt <= now || now + 1000000 < timerAt)) {
         timerOn = false;
@@ -693,6 +730,17 @@ void DVArtificialIntelligence::ArriveOnRoute(bool villain) {
 int DVArtificialMalignity::LoadAttributesFromFile(SBFile& f) {
     profile = f.U32();
     aiShort = f.U16();
+    // the character profile: his properties (+0x104..), his firearm and his life (the energy)
+    const DVCharacterProfile* cp =
+        DVPsychoanalyst::mpTheOnlyPsychoanalistInTown ? DVPsychoanalyst::mpTheOnlyPsychoanalistInTown->GetCharacterFromCompendium(profile)
+                                                      : nullptr;
+    if (cp) {
+        for (int i = 0; i < 7; ++i) properties[i] = cp->properties[i];
+        properties[7] = cp->hobbies[0];
+        npc->firearm = DVArmsTrader::mpTheOnlyArmstraderInTown ? DVArmsTrader::mpTheOnlyArmstraderInTown->GetFirearmFromCatalog(cp->firearm)
+                                                               : nullptr;
+    }
+    npc->life = properties[0];
     uint8_t a = f.U8() & 0x7f;
     if (a == 3)
         attitude = 4;
@@ -701,6 +749,11 @@ int DVArtificialMalignity::LoadAttributesFromFile(SBFile& f) {
     else if (a == 1)
         attitude = 1;
     drunk = f.U8();
+    // no property may be 0 (the courage, the IQ, the shooting skill, ...)
+    for (int i : {0, 1, 2, 3, 4, 5, 6})
+        if (properties[i] == 0) properties[i] = 1;
+    npc->villainSkill = properties[6];
+    if (npc->firearm) npc->ammo = (int16_t)npc->firearm->magazine;
     return 8;
 }
 
@@ -863,18 +916,221 @@ void DVArtificialMalignity::EventViewStandardProcedure(DVElement* e) {
 }
 
 // DVArtificialMalignity::EventIdentifyStandardProcedure: he knows who it is: the alarm (the red
-// cone); he faces the hero and keeps him in sight (calling his friends, shooting and chasing come
-// with the fights)
+// cone). He calls his friends around (AlertFriends 0x226) and fights (Fight)
 void DVArtificialMalignity::EventIdentifyStandardProcedure(DVElement* e) {
     BreakMacro();
     if (attitude != 4 && attitude != 2) return;
     SetAlertStatus(2, false);
-    npc->SetViewTarget(e, true);
-    npc->SetViewCone(0xb);
+    attitude = 4;
     target = e;
-    SetState(10, 0);
-    if (e && e->sprite) Face(e->sprite->pos.posMap, false);
-    React(10, true);
+    if (e && e->sprite) {
+        lastKnown.p = e->sprite->pos.posMap;
+        lastKnown.sector = e->sprite->pos.sector;
+        lastKnown.layer = (int16_t)e->sprite->pos.layer;
+    }
+    searched = false;
+    searchRounds = 0;
+    AlertFriends(0x226);
+    Fight(true, true);
+}
+
+bool DVArtificialMalignity::MyIsDetecting(const DVElement* e) const {
+    DVEngine* eng = DVEngine::mpEngine;
+    if (!eng || !e) return false;
+    const auto& h = eng->Heroes();
+    for (size_t i = 0; i < h.size() && i < detections.size(); ++i)
+        if (h[i] == e) return detections[i] != 0;
+    return false;
+}
+
+static DVElementActor* AsActor(DVElement* e) { return dynamic_cast<DVElementActor*>(e); }
+
+// DVArtificialMalignity::Fight: in sight, he stops, aims and shoots (ShootAt), then thinks again
+// 20 frames later; else he looks for his enemies (GetBattleOverview)
+void DVArtificialMalignity::Fight(bool first, bool b) {
+    npc->KillTimer(false);
+    DVElementActor* t = AsActor(target);
+    if (!t || t->dead || t->sprite->pos.posture == 0xe || !MyIsDetecting(t)) {
+        GetBattleOverview(b);
+        return;
+    }
+    if (first) {
+        npc->Halt();
+        SetState(10, SUB_FIGHT_SHOT);
+    } else {
+        SetState(10, SUB_FIGHT);
+    }
+    npc->SetViewTarget(t, true);
+    npc->SetViewCone(0xb);
+    ShootAt(t);
+    LaunchTimer(0x14);
+}
+
+// DVArtificialMalignity::ShootAt: the "shoot at" interaction (0x32) with his firearm
+void DVArtificialMalignity::ShootAt(DVElement* t) {
+    if (!npc->firearm || !npc->OrderShoot(t)) return;
+}
+
+// DVArtificialMalignity::GetBattleOverview: stops and looks around for the enemies he knows
+// (state 10, 0xa7), then decides (the timer: 6 frames, 18 when looking around slowly)
+void DVArtificialMalignity::GetBattleOverview(bool b) {
+    npc->Halt();
+    SetState(10, SUB_OVERVIEW);
+    npc->SetViewCone(b ? 4 : 3);
+    LaunchTimer(b ? 6 : 0x12);
+}
+
+void DVArtificialMalignity::BattleDecisions() {
+    DVEngine* eng = DVEngine::mpEngine;
+    if (!eng) return;
+    DVPositionInterface& pos = npc->sprite->pos;
+    // the nearest hero he sees (and who is alive)
+    DVElementActor* best = nullptr;
+    float bestD = 1e30f;
+    const auto& heroes = eng->Heroes();
+    for (size_t i = 0; i < heroes.size() && i < detections.size(); ++i) {
+        DVElementActor* h = heroes[i];
+        if (!detections[i] || h->dead) continue;
+        SBGeoVector2D d = h->sprite->pos.posMap - pos.posMap;
+        float dd = d.x * d.x + d.y * d.y * 3.04f;
+        if (dd < bestD) {
+            bestD = dd;
+            best = h;
+        }
+    }
+    if (best) {
+        target = best;
+        lastKnown.p = best->sprite->pos.posMap;
+        lastKnown.sector = best->sprite->pos.sector;
+        lastKnown.layer = (int16_t)best->sprite->pos.layer;
+        searched = false;
+        searchRounds = 0;
+        float range = npc->firearm ? (float)npc->firearm->range : 0.0f;
+        float dist = std::sqrt(bestD);
+        if (npc->firearm && dist < range * 0.85f && dist <= (float)npc->view.length) {
+            Fight(false, false);
+            return;
+        }
+        // too far for his gun: he runs nearer
+        SetState(10, SUB_CHASE);
+        npc->SetViewTarget(best, false);
+        if (!GoTo(lastKnown, 1)) GetBattleOverview(false);
+        else LaunchTimer(25);
+        return;
+    }
+    // nobody in sight: where was he last seen?
+    if (!searched && lastKnown.sector) {
+        searched = true;
+        SetState(10, SUB_CHASE);
+        npc->SetViewCone(4);
+        if (GoTo(lastKnown, 1)) {
+            LaunchTimer(250);
+            return;
+        }
+    }
+    if (searchRounds < 3) {
+        // DVArtificialMalignity::SeekArea: looks around
+        ++searchRounds;
+        SetState(10, SUB_SEARCH);
+        npc->Halt();
+        npc->SetViewCone(3);
+        if (searchRounds > 1) FaceTo((uint8_t)((pos.direction + 5 + desprand() % 7) & 0xf), false);
+        LaunchTimer(50 + desprand() % 25);
+        return;
+    }
+    // he gives up: suspicious for a while, then back to his duty
+    SetAlertStatus(1, false);
+    SetState(3, SUB_WATCH);
+    npc->SetViewCone(8);
+    lastSeen = Now();
+    LaunchTimer(50);
+}
+
+// DVArtificialMalignity::EventGetBulletStandardProcedure: shot at, he knows who his enemy is
+void DVArtificialMalignity::EventGetBulletStandardProcedure(DVElement* shooter) {
+    BreakMacro();
+    attitude = 4;
+    target = shooter;
+    if (shooter && shooter->sprite) {
+        lastKnown.p = shooter->sprite->pos.posMap;
+        lastKnown.sector = shooter->sprite->pos.sector;
+        lastKnown.layer = (int16_t)shooter->sprite->pos.layer;
+        npc->SetViewTarget(shooter, true);
+    }
+    SetAlertStatus(2, false);
+    searched = false;
+    searchRounds = 0;
+    npc->SetViewCone(6);
+    if (state != 10) AlertFriends(0x226);
+    if (MyIsDetecting(shooter)) Fight(true, true);
+    else GetBattleOverview(true);
+}
+
+// DVArtificialMalignity::EventHearStandardProcedure: a shot (or a body falling): he becomes
+// hostile, turns to it and goes to see
+void DVArtificialMalignity::EventHearStandardProcedure(const DVStimulus& s) {
+    uint32_t kind = s.u10;
+    if (kind == 0 || kind == 1 || kind == 4 || kind == 5) attitude = 4;
+    if (state == 10) {
+        if (!target || !MyIsDetecting(target)) {
+            lastKnown.p = s.point;
+            if (DVFastFindGrid* g = DVFastFindGrid::mpFastFindGrid) {
+                DVSectorMotionArea* a = g->FindMotionArea(npc->sprite->pos.layer, s.point);
+                if (a) lastKnown.sector = a;
+            }
+            searched = false;
+        }
+        return;
+    }
+    BreakMacro();
+    lastKnown.p = s.point;
+    lastKnown.layer = (int16_t)npc->sprite->pos.layer;
+    lastKnown.sector = npc->sprite->pos.sector;
+    if (DVFastFindGrid* g = DVFastFindGrid::mpFastFindGrid)
+        if (DVSectorMotionArea* a = g->FindMotionArea(npc->sprite->pos.layer, s.point)) lastKnown.sector = a;
+    SetAlertStatus(1, false);
+    SetState(3, SUB_NOISE);
+    npc->SetViewTarget(s.point, false);
+    npc->SetViewCone(2);
+    Face(s.point, false);
+    lastSeen = Now();
+    // after a moment he goes there
+    LaunchTimer(15 + desprand() % 20);
+}
+
+// DVArtificialMalignity::CallAlertStandardProcedure: a friend calls: he turns to him, alerted
+void DVArtificialMalignity::CallAlertStandardProcedure(DVElement* f) {
+    BreakMacro();
+    alerter = f;
+    SetState(3, SUB_HELP);
+    if (f && f->sprite) Face(f->sprite->pos.posMap, false);
+    SetAlertStatus(1, false);
+    npc->SetViewTarget(f, true);
+    npc->SetViewCone(8);
+    lastSeen = Now();
+    React(0x1e, false);
+}
+
+// DVArtificialMalignity::AlertFriends: the villains around who can see him (or are near
+// enough) are called for help (stimulus 0x27)
+void DVArtificialMalignity::AlertFriends(uint16_t radius) {
+    DVEngine* eng = DVEngine::mpEngine;
+    if (!eng) return;
+    DVPositionInterface& pos = npc->sprite->pos;
+    DVFastFindGrid* grid = DVFastFindGrid::mpFastFindGrid;
+    for (DVElementActor* n : eng->NPCs()) {
+        if (n == npc || !n->ai || !n->ai->IsVillain() || n->dead || n->ai->state == 0 || n->ai->state == 10) continue;
+        SBGeoVector2D d = n->sprite->pos.posMap - pos.posMap;
+        if (SBMaxNorm(d) >= (float)radius || d.x * d.x + d.y * d.y >= (float)radius * radius) continue;
+        // IsDetecting360Degrees: he must see the one who calls
+        bool sees = d.x * d.x + d.y * d.y < 150.0f * 150.0f ||
+                    !grid || grid->IsReachable(n->EyesPoint(), npc->EyesPoint(), true);
+        if (!sees) continue;
+        DVStimulus st = DVStimulus::Of(STIM_HELP);
+        st.element = npc;
+        st.source = 3;
+        n->ai->Think(st);
+    }
 }
 
 // DVArtificialMalignity::Think, the patrol part of state 2
@@ -891,6 +1147,71 @@ bool DVArtificialMalignity::Think(DVStimulus& s) {
     }
     if (type == STIM_IDENTIFY && state != 0) {
         EventIdentifyStandardProcedure(s.element);
+        EndThink();
+        return true;
+    }
+    if (state == 0 || npc->dead) {
+        EndThink();
+        return true;
+    }
+    if (type == STIM_BULLET) {
+        EventGetBulletStandardProcedure(s.element);
+        EndThink();
+        return true;
+    }
+    if (type == STIM_HEAR) {
+        EventHearStandardProcedure(s);
+        EndThink();
+        return true;
+    }
+    if (type == STIM_HELP && state != 10) {
+        CallAlertStandardProcedure(s.element);
+        EndThink();
+        return true;
+    }
+    if (state == 10) {
+        // the fight
+        switch (type) {
+        case STIM_TIMER:
+            BattleDecisions();
+            break;
+        case STIM_REACHED:
+        case STIM_FAILED:
+            if (substate == SUB_CHASE) BattleDecisions();
+            break;
+        case STIM_VIEW:
+            // someone in sight again while he searches: at him
+            if (substate == SUB_CHASE || substate == SUB_SEARCH || substate == SUB_OVERVIEW) {
+                target = s.element;
+                Fight(true, true);
+            }
+            break;
+        default:
+            break;
+        }
+        EndThink();
+        return true;
+    }
+    if (state == 3 && (substate == SUB_HELP || substate == SUB_NOISE) && type == STIM_TIMER) {
+        if (substate == SUB_HELP) {
+            // his friend's enemy is now his: the alarm, then the fight
+            DVArtificialMalignity* f = alerter ? dynamic_cast<DVArtificialMalignity*>(AsActor(alerter)->ai.get()) : nullptr;
+            if (f) {
+                target = f->target;
+                lastKnown = f->lastKnown;
+            }
+            attitude = 4;
+            SetAlertStatus(2, false);
+            searched = false;
+            searchRounds = 0;
+            GetBattleOverview(true);
+        } else {
+            // the noise: he goes to see (then looks around, then back to duty)
+            SetState(3, SUB_WATCH);
+            if (lastKnown.sector) GoTo(lastKnown, 0);
+            lastSeen = Now();
+            LaunchTimer(150);
+        }
         EndThink();
         return true;
     }
@@ -1012,7 +1333,7 @@ void DVArtificialBonhomie::SetState(uint32_t s, uint32_t sub) {
 void DVArtificialBonhomie::InitOneAI() {
     npc->lastDirection = npc->sprite->pos.direction;
     npc->view.radius = npc->view.radiusNow = muwStandardViewPolygonRadius;
-    npc->hearing = 100;
+    npc->life = 100;
     bool init = npc->InitState(*this);
     stayOnPost = role == 2;
     npc->StoreInitialPositionParameters();
@@ -1138,6 +1459,18 @@ bool DVArtificialBonhomie::Think(DVStimulus& s) {
         return true;
     }
     uint32_t type = s.type;
+    if (npc->dead || state == 0) {
+        EndThink();
+        return true;
+    }
+    if (type == STIM_HEAR || type == STIM_BULLET) {
+        // a shot: the townsfolk look at it (their panic and flight come later)
+        DVposition p = Position();
+        p.p = type == STIM_HEAR ? s.point : (s.element && s.element->sprite ? s.element->sprite->pos.posMap : p.p);
+        npc->GlanceAt(p, 0x32);
+        EndThink();
+        return true;
+    }
     if (state == AI_NORMAL && type == STIM_VIEW) {
         EventViewStandardProcedure(s.element);
         EndThink();

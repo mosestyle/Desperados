@@ -117,8 +117,14 @@ int main(int argc, char** argv) {
     if (getenv("DVLIST"))
         for (DVElement* e : engine.Elements())
             if (e->sprite)
-                fprintf(stderr, "elem %-10s %-24s %.0f,%.0f layer %u posture %u\n", e->KindName(), e->scriptName.c_str(),
+            {
+                fprintf(stderr, "elem %-10s %-24s %.0f,%.0f layer %u posture %u anims", e->KindName(), e->scriptName.c_str(),
                         e->sprite->pos.posMap.x, e->sprite->pos.posMap.y, e->sprite->pos.layer, e->sprite->pos.posture);
+                if (getenv("DVANIM"))
+                    for (unsigned a = 0; a < 0x120; ++a)
+                        if (e->sprite->HasAnimation(a)) fprintf(stderr, " %x", a);
+                fprintf(stderr, "\n");
+            }
     int hi = atoi(argv[6]);
     if (hi >= (int)engine.Heroes().size()) return 1;
     DVElementActor* h = engine.Heroes()[hi];
@@ -168,17 +174,30 @@ int main(int argc, char** argv) {
             engine.ClampCamera();
             snprintf(name, sizeof name, "%s%03d.ppm", argv[3], frame++);
             save(draw, engine, name, h, t == 0);
-            fprintf(stderr, "t %d pos %.1f,%.1f dir %u/%u anim %u entry %u posture %u orders %zu\n", t, pos.posMap.x,
-                    pos.posMap.y, pos.direction, pos.directionWanted, h->sprite->animation, h->sprite->entry, pos.posture,
-                    h->orders.size());
+            fprintf(stderr, "t %d pos %.1f,%.1f dir %u/%u anim %u entry %u posture %u orders %zu life %d ammo %d%s\n", t,
+                    pos.posMap.x, pos.posMap.y, pos.direction, pos.directionWanted, h->sprite->animation, h->sprite->entry,
+                    pos.posture, h->orders.size(), h->life, h->ammo, engine.missionFailed ? " FAILED" : "");
         }
         if (getenv("DVNPC") && t % atoi(getenv("DVNPC")) == 0)
             for (DVElementActor* n : engine.NPCs())
                 if (n->ai)
-                    fprintf(stderr, "  t%d npc %-8s %6.0f,%-6.0f st %u/%#x role %u cmd %#x path %zu@%u view %u ang %.2f al %u sus %u\n", t,
+                    fprintf(stderr, "  t%d npc %-8s %6.0f,%-6.0f st %u/%#x role %u cmd %#x path %zu@%u view %u ang %.2f al %u sus %u life %d%s\n", t,
                             n->KindName(), n->sprite->pos.posMap.x, n->sprite->pos.posMap.y, n->ai->state, n->ai->substate,
                             n->ai->role, n->CurrentCommand(), n->ai->path.Count(), n->ai->path.current, n->view.status,
-                            n->view.angle, n->ai->alertStatus, n->ai->suspect);
+                            n->view.angle, n->ai->alertStatus, n->ai->suspect, n->life, n->ai->locked ? " LOCKED" : "");
+        if (getenv("DVSHOOT") && t == atoi(getenv("DVSHOOT"))) {
+            // the hero shoots at the NPC nearest to DVSHOOTAT=x,y
+            const char* a = getenv("DVSHOOTAT");
+            SBGeoPoint2D w((float)atof(a), (float)atof(strchr(a, ',') + 1));
+            DVElementActor* best = nullptr;
+            float bd = 1e30f;
+            for (DVElementActor* n : engine.NPCs()) {
+                SBGeoVector2D d = n->sprite->pos.posMap - w;
+                if (d.x * d.x + d.y * d.y < bd) { bd = d.x * d.x + d.y * d.y; best = n; }
+            }
+            fprintf(stderr, "shoot at %s %.0f,%.0f: %d\n", best ? best->KindName() : "-", best ? best->sprite->pos.posMap.x : 0.f,
+                    best ? best->sprite->pos.posMap.y : 0.f, engine.OrderShoot(best));
+        }
         if (getenv("DVSEE") && t % atoi(getenv("DVSEE")) == 0 && engine.watched) {
             // why the watched NPC sees each hero (or not)
             DVElementActor* n = engine.watched;

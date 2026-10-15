@@ -4,10 +4,11 @@
 // something", "I hear something", "I reached the place I was walking to", "my timer ran out"...
 // Think(stimulus) is the heart of each brain; StartThink / EndThink wrap every call.
 //
-// This step has the parts used by the patrols: the routes and their macro commands, the posts,
-// the walks to the waypoints, the timers, the view cone settings. The other branches of Think
-// (seeing, hearing, alarms, fights) come with the next steps; a stimulus they would handle is
-// for now ignored.
+// Translated so far: the patrols (routes, macro commands, posts, walks, timers, view cones), the
+// sight (seeing, suspicion, identifying, losing), the alarms, the shots heard, the friends called
+// for help and the core of the fights (shoot at the nearest hero in sight and in range, run nearer,
+// run to where he was last seen, search there, give up). The original's full battle tactics
+// (cover, ambushes, surrounding, gattlings, horses) come later.
 #pragma once
 #include <cstdint>
 #include <deque>
@@ -48,7 +49,9 @@ enum : uint32_t {
     STIM_FAILED = 5,          // the walk could not be done
     STIM_ACTION_DONE = 6,     // an action (animation) is finished
     STIM_TIMER = 8,           // the brain's timer ran out
+    STIM_BULLET = 0x20,       // got a bullet (element: the shooter)
     STIM_WAYPOINT_DONE = 0x21,
+    STIM_HELP = 0x27,         // a friend calls for help (AlertFriends; element: the friend)
     STIM_RETURN_TO_DUTY = 0x22,
 };
 
@@ -69,6 +72,16 @@ enum : uint32_t {
     SUB_AT_POST = 0x80,       // standing at its post
     SUB_AT_POST_2 = 0x84,
     SUB_MACRO = 0x85,         // running a waypoint's macro commands
+    // fights (state 10) and alerts (state 3)
+    SUB_WATCH = 0xf,          // watching someone he can't tell yet
+    SUB_HELP = 0x10,          // a friend called (CallAlertStandardProcedure)
+    SUB_NOISE = 0x13,         // going to see what the noise was
+    SUB_FIGHT_SHOT = 0x9a,    // just shot (Fight, first)
+    SUB_FIGHT = 0x98,         // shooting on (Fight)
+    SUB_OVERVIEW = 0xa7,      // looking for his enemies (GetBattleOverview)
+    // the engine's own (the original's BattleDecisions / SeekArea use many more)
+    SUB_CHASE = 0xa8,         // running after the enemy / to where he was last seen
+    SUB_SEARCH = 0xa9,        // looking around there
 };
 
 class DVArtificialIntelligence {
@@ -110,6 +123,12 @@ public:
     // DVArtificialIntelligence::UpdateDetection (0x081ae260): what it knows of hero i changed
     void UpdateDetection(uint8_t i, uint8_t level, DVElement* hero);
     void React(uint16_t frames, bool b);      // DVArtificialMalignity::React (the waiting part)
+    // DVArtificialIntelligence::ScriptLockAI (0x081b1330) / ScriptUnlockAI (0x081b13b0): the
+    // scripts stop the brain (the stimuli are dropped, or kept when `keep`) and start it again
+    void ScriptLockAI(bool keep);
+    void ScriptUnlockAI();
+    bool locked = false;                 // +0x3b8
+    bool lockKeep = false;               // +0x3b9
 
     DVElementActor* npc;                 // +4
     uint32_t state = 0;                  // +8
@@ -182,7 +201,25 @@ public:
     bool IsVillain() const override { return true; }
     void EventViewStandardProcedure(DVElement* e);      // 0x081cf030
     void EventIdentifyStandardProcedure(DVElement* e);  // 0x081d1fd0
-    uint32_t profile = 0;    // +0x10 of the Malignity part
+    void EventGetBulletStandardProcedure(DVElement* shooter);  // 0x081cd830
+    void EventHearStandardProcedure(const DVStimulus& s);    // 0x081d2de0
+    void CallAlertStandardProcedure(DVElement* friendNpc);   // 0x081cecc0
+    void AlertFriends(uint16_t radius);                      // 0x081e0ee0
+    void Fight(bool first, bool b);                          // 0x081d70b0
+    void ShootAt(DVElement* t);                              // 0x081d6830
+    void GetBattleOverview(bool b);                          // 0x081d54d0
+    // DVArtificialMalignity::BattleDecisions (0x081d72b0, 2100 lines of tactics: cover, groups,
+    // surrounding): here its core: shoot at the nearest hero in sight and in range, run nearer
+    // when too far, run to where he was last seen, look around there, then give up
+    void BattleDecisions();
+    bool MyIsDetecting(const DVElement* e) const;            // DVArtificialIntelligence::MyIsDetecting
+    DVElement* alerter = nullptr;   // +0x278 the friend who called
+    bool searched = false;          // has been to the last known place
+    uint8_t searchRounds = 0;
+    uint32_t profile = 0;    // +0x100 of the Malignity part
+    // +0x104: the profile's properties (0 energy, 1 courage, 2 IQ, 3 fitness, 4 laziness,
+    // 5 aggressiveness, 6 shooting skill, 7)
+    uint8_t properties[8] = {100, 50, 50, 50, 50, 50, 50, 0};
     uint16_t aiShort = 0;
     uint8_t aiByte = 0;
 };

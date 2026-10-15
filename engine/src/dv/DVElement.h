@@ -64,6 +64,10 @@ struct DVOrder {
     SBGeoPoint2D goal;          // +0x14
     float tolerance = 0;        // +4
     uint8_t direction = 0;      // the turn's direction (the sequence element's +0x20)
+    class DVElement* target = nullptr;  // the sequence element's +0x30 (who to shoot at)
+    SBGeoPoint3D aim;                   // +8 (where to shoot)
+    uint16_t damage = 0;                // a bullet's hit (the sequence element's +0x16)
+    class DVElement* from = nullptr;    // ... and who shot it (+0x2c)
     static uint32_t NewID();
 };
 
@@ -108,6 +112,15 @@ enum : uint32_t {
     CMD_LYING = 7,       // "Couché"
     CMD_CRAWL = 9,       // "Ramper"
     CMD_STAND_UP = 10,   // "Se lever"
+    CMD_SHOOT_LYING = 8, // "Tirer couché"
+    CMD_HIT = 0x19,      // hit by a bullet, standing
+    CMD_HIT_LYING = 0x1a,
+    CMD_SHOOT = 0x1c,    // "Tirer"
+    CMD_KNOCKED = 0x20,
+    CMD_DIE = 0x21,      // "Mourir"
+    CMD_DEAD = 0xd2,     // lying dead (the death's last frame)
+    CMD_DEAD_KNOCKED = 0xd3,
+    CMD_RELOAD = 0xe1,   // the engine's own: wait while reloading
     CMD_TURN = 0xe0,     // turn on the spot (the sequence's 0x1d)
     CMD_NONE = 0xbb,
 };
@@ -136,6 +149,8 @@ public:
     std::vector<SBGeoPoint2D> PlannedPath() const;
 
     bool selected = false;
+    bool playable = true;       // +0xb5 (DVScript::Deactivate: a hero the player can't use yet)
+    bool animalLocked = false;  // +0x139 (DVScript::LockAI for the animals)
     int selectionPulse = 0;     // +0x188 ticks left of the selection flash
     int selectionPulseLen = 0;  // +0x18c
 
@@ -157,7 +172,7 @@ public:
     DVposition home;               // +0x22c
     uint16_t lastDirection = 0;    // +0x220
     bool knockedOut = false;       // +0x12e
-    uint16_t hearing = 100;        // +0x130
+    int16_t life = 0x29a;          // +0x130 (DVElementActorHuman: 666; heroes 100; villains their energy)
     DVElement* horse = nullptr;    // +0x134
     bool isMove = false;           // the current sequence is a walk (DVSequenceElement 0x17)
     uint8_t frameOffset = 0;       // +0x23c (spreads The16thFrame over the frames)
@@ -196,6 +211,30 @@ public:
     void ResetDazzlingImmunity() {}    // 0x0823acf0 (the mirror's blinding comes with the fights)
     // DVElementActorNPC::GetAlertColor (0x08234b40): the view cone's colour
     void GetAlertColor(uint8_t& r, uint8_t& g, uint8_t& b) const;
+
+    // ---- firearms (DVElementActorHuman, Game/DVElementActorHuman.cpp) ----------------------------
+    const struct DVFirearm* firearm = nullptr;          // +0x14c
+    int16_t ammo = 0;                                   // +0x14a bullets in the gun
+    const struct DVCharacterProfile* heroProfile = nullptr;  // PC +0x2b0
+    uint8_t villainSkill = 50;                          // villain +0x4de (profile's shooting skill)
+    bool dead = false;
+    bool lastShotHit = false;                           // +0x3fa
+    void InitFirearm();                                 // the profile's weapon and life
+    uint8_t GetShootingSkill() const;                   // 0x081fc120 / 0x0823e210
+    bool IsSnipering(bool) const { return false; }      // 0x081fc190
+    SBGeoPoint3D FirearmPoint() const;                  // ComputeFirearmPoint (the shot's start)
+    // GetHitProbability (0x082260d0): % of chance to hit at `ratio` = distance / range
+    uint8_t GetHitProbability(float ratio, bool hard, bool special) const;
+    // Shoot(DVElement*, DVFirearm const*, bool) (0x082248a0): the bullets at someone
+    bool Shoot(DVElement* target, const struct DVFirearm* w, bool special);
+    // ShootSingleBullet (0x082257f0): a bullet that misses (or a shot at a place)
+    bool ShootSingleBullet(const SBGeoPoint3D& at, const struct DVFirearm* w, bool special, bool place);
+    // DVElementActorHuman::Translate 0x2f: a bullet hits; the hit or the death is played
+    void GotBullet(uint16_t damage, DVElement* shooter);
+    void Kill();                                        // DVElementActorPC / NPC / NPCVillain::Kill
+    // the orders of a shot at someone (DVElementActorHuman::Translate 0x32)
+    bool OrderShoot(DVElement* target);
+    void Reload();
     static void InitColors(uint32_t green, uint32_t yellow, uint32_t red, uint32_t pink);  // 0x0822b6a0
 };
 
