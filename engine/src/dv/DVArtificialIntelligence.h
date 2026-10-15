@@ -11,6 +11,7 @@
 #pragma once
 #include <cstdint>
 #include <deque>
+#include <vector>
 
 #include "dv/DVHikingGuide.h"
 #include "sb/SBGeo.h"
@@ -42,6 +43,7 @@ enum : uint32_t {
     STIM_VIEW = 0,            // sees someone
     STIM_IDENTIFY = 1,
     STIM_HEAR = 3,
+    STIM_LOST = 2,            // does not see him any more
     STIM_REACHED = 4,         // the walk (sequence) is finished
     STIM_FAILED = 5,          // the walk could not be done
     STIM_ACTION_DONE = 6,     // an action (animation) is finished
@@ -105,6 +107,9 @@ public:
     void Hourglass();
     // a sequence the brain launched is over (DVElementActorNPC::SendCondolationCard)
     void SequenceDone(bool move, bool failed);
+    // DVArtificialIntelligence::UpdateDetection (0x081ae260): what it knows of hero i changed
+    void UpdateDetection(uint8_t i, uint8_t level, DVElement* hero);
+    void React(uint16_t frames, bool b);      // DVArtificialMalignity::React (the waiting part)
 
     DVElementActor* npc;                 // +4
     uint32_t state = 0;                  // +8
@@ -129,6 +134,14 @@ public:
     bool glanceOn = false;               // +0x234
     uint32_t glanceUntil = 0;            // +0x238
     uint16_t boredTicks = 0;             // +0x244
+    uint16_t suspect = 0;                // +0x246 grows while it sees someone (full: 0x2000)
+    uint16_t yellow = 0;                 // +0x248 how alarmed when suspicious (cone colour)
+    uint16_t yellowBack = 0;             // +0x24c calming down from 2 / 5
+    uint16_t u24e = 0;                   // +0x24e
+    std::vector<uint8_t> detections;     // +0x188 per hero: 0 no, 1 seen, 2 identified
+    uint32_t lastSeen = 0;               // +0x3ec
+    DVElement* target = nullptr;         // +0x210
+    DVposition lastKnown;                // +0x27c
     bool gotoFailed = false;             // +0x318
     bool gotoDone = false;               // +0x319
     bool riding = false;                 // +800
@@ -147,6 +160,8 @@ public:
 
     static uint32_t* mpUniversalFrameCounter;
     static uint16_t muwStandardViewPolygonRadius;
+    static uint32_t mCurrentOverallAlertStatus;         // the highest level of all the NPCs
+    static uint32_t mCurrentOverallVillainAlertStatus;  // of the villains
 
 protected:
     bool sequenceIsMove = false;
@@ -165,6 +180,8 @@ public:
     void ReturnToDutyStandardProcedure() override;   // 0x081e2970
     bool DefaultBoredStandardProcedure() override;   // 0x081e3ad0
     bool IsVillain() const override { return true; }
+    void EventViewStandardProcedure(DVElement* e);      // 0x081cf030
+    void EventIdentifyStandardProcedure(DVElement* e);  // 0x081d1fd0
     uint32_t profile = 0;    // +0x10 of the Malignity part
     uint16_t aiShort = 0;
     uint8_t aiByte = 0;
@@ -179,6 +196,8 @@ public:
     void The16thFrame(uint8_t frame) override;       // 0x0819dce0
     bool Think(DVStimulus& s) override;              // 0x08199110
     void ReturnToDutyStandardProcedure() override;   // 0x0819d780
+    void EventViewStandardProcedure(DVElement* e);      // 0x0819bfd0
+    void EventIdentifyStandardProcedure(DVElement* e);  // 0x0819c2e0
     uint32_t speech = 0;     // +0x10 of the Bonhomie part
     bool stayOnPost = false; // +4 (role 2)
     bool goesAway = false;   // +0xc

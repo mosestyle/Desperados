@@ -146,6 +146,18 @@ int main(int argc, char** argv) {
     bool ok = dest.x < 0 ? true : engine.OrderMove(dest, run);
     fprintf(stderr, "order %s, %zu orders\n", ok ? "ok" : "REFUSED", h->orders.size());
     for (const DVOrder& o : h->orders) fprintf(stderr, "  cmd %u -> %.1f,%.1f\n", o.command, o.goal.x, o.goal.y);
+    if (getenv("DVWATCH")) {
+        // show the view cone of the NPC nearest to x,y
+        SBGeoPoint2D w((float)atof(getenv("DVWATCH")), (float)atof(strchr(getenv("DVWATCH"), ',') + 1));
+        float best = 1e30f;
+        for (DVElementActor* n : engine.NPCs()) {
+            SBGeoVector2D d = n->sprite->pos.posMap - w;
+            if (d.x * d.x + d.y * d.y < best) {
+                best = d.x * d.x + d.y * d.y;
+                engine.watched = n;
+            }
+        }
+    }
     char name[512];
     int frame = 0;
     for (int t = 0; t <= ticks; ++t) {
@@ -163,10 +175,24 @@ int main(int argc, char** argv) {
         if (getenv("DVNPC") && t % atoi(getenv("DVNPC")) == 0)
             for (DVElementActor* n : engine.NPCs())
                 if (n->ai)
-                    fprintf(stderr, "  t%d npc %-8s %6.0f,%-6.0f st %u/%#x role %u cmd %#x path %zu@%u view %u ang %.2f\n", t,
+                    fprintf(stderr, "  t%d npc %-8s %6.0f,%-6.0f st %u/%#x role %u cmd %#x path %zu@%u view %u ang %.2f al %u sus %u\n", t,
                             n->KindName(), n->sprite->pos.posMap.x, n->sprite->pos.posMap.y, n->ai->state, n->ai->substate,
                             n->ai->role, n->CurrentCommand(), n->ai->path.Count(), n->ai->path.current, n->view.status,
-                            n->view.angle);
+                            n->view.angle, n->ai->alertStatus, n->ai->suspect);
+        if (getenv("DVSEE") && t % atoi(getenv("DVSEE")) == 0 && engine.watched) {
+            // why the watched NPC sees each hero (or not)
+            DVElementActor* n = engine.watched;
+            SBGeoPoint3D e = n->EyesPoint();
+            for (DVElementActor* hh : engine.Heroes()) {
+                uint16_t sp = 0;
+                uint8_t lvl = n->DetectHero(hh, sp);
+                SBGeoPoint3D a, b, c;
+                hh->DetectionPoints(a, b, c);
+                fprintf(stderr, "  see t%d %s->%s lvl %u sp %u eyes %.0f,%.0f,%.0f pts %.0f,%.0f,%.0f: %d %d %d dir %.2f,%.2f len %u\n", t,
+                        n->KindName(), hh->KindName(), lvl, sp, e.x, e.y, e.z, a.x, a.y, a.z, n->SeesPoint(a, false),
+                        n->SeesPoint(b, false), n->SeesPoint(c, false), n->view.dir.x, n->view.dir.y, n->view.length);
+            }
+        }
         engine.PerformHourglass();
     }
     fprintf(stderr, "END %s %.1f,%.1f orders %zu goal %.1f,%.1f\n", h->KindName(), pos.posMap.x, pos.posMap.y, h->orders.size(),

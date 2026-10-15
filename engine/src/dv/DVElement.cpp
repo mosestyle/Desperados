@@ -103,7 +103,9 @@ int DVElementActor::LoadStateFromFile(SBFile& f) {
     int n = sprite->LoadSpriteFromFile(f, FRAME_ACTOR);
     if (kind >= KIND_COOPER && kind <= KIND_MIA) {
         uint16_t len = f.U16();
-        f.Skip(len, 1);
+        std::string name(len, '\0');
+        if (len) f.Serialize(&name[0], len);
+        scriptName = name.substr(0, name.find('\0'));
         profile = f.U16();
         MakeSurfaces(4, 0, true);
         return n + 4 + len;
@@ -645,6 +647,27 @@ void DVElementActor::GlanceAt(const DVposition& p, uint32_t frames) {
 
 void DVElementActor::RestoreView() { view = savedView; }
 
+void DVElementActor::SetViewTarget(const SBGeoPoint2D& p, bool turn) {
+    if (ai) ai->glanceOn = false;
+    view.target = p;
+    view.targetElement = nullptr;
+    DVPositionInterface& pos = sprite->pos;
+    if (pos.posture == 1 || !turn) {
+        view.status = 4;
+        return;
+    }
+    Halt();
+    pos.directionWanted = SBGetSector0to15(p - pos.posMap, 1.0f) & 0xf;
+    view.status = 5;
+}
+
+void DVElementActor::SetViewTarget(DVElement* e, bool turn) {
+    if (!e || !e->sprite) return;
+    SetViewTarget(e->sprite->pos.posMap, turn);
+    view.targetElement = e;
+    view.status = view.status == 5 ? 7 : 6;
+}
+
 void DVElementActor::DontFixDirectionOnViewTarget() {
     if (view.status == 5)
         view.status = 4;
@@ -731,6 +754,13 @@ void DVElementActor::RefreshView() {
     case 6:
     case 7:
     case 9: {
+        if ((v.status == 6 || v.status == 7) && v.targetElement && v.targetElement->sprite)
+            v.target = v.targetElement->sprite->pos.posMap;
+        if (v.status == 7 || v.status == 5) {
+            // the body follows the target
+            pos.directionWanted = SBGetSector0to15(v.target - pos.posMap, 1.0f) & 0xf;
+            if (orders.empty()) pos.Turn();
+        }
         SBGeoVector2D to = v.target - pos.posMap;
         if (SBMaxNorm(to) == 0.0f) to = body;
         to.y *= 0.57357645f;
@@ -766,6 +796,289 @@ void DVElementActor::RefreshView() {
     v.edgeL.y *= 0.57357645f;
     v.edgeR = rotated(v.dir, v.halfWidth);
     v.edgeR.y *= 0.57357645f;
+}
+
+// ---- sight ------------------------------------------------------------------------------------
+
+// gpCrawlingOffsetsX / Y (0x0855d720 / 0x0855d760): from the middle of a lying body to its head,
+// by direction
+static const float kCrawlX[16] = {0.0f, 6.1f, 11.3f, 14.8f, 16.0f, 14.8f, 11.3f, 6.1f,
+                                  0.0f, -6.1f, -11.3f, -14.8f, -16.0f, -14.8f, -11.3f, -6.1f};
+static const float kCrawlY[16] = {-9.18f, -8.49f, -6.48f, -3.5f, 0.0f, 3.5f, 6.48f, 8.49f,
+                                  9.18f, 8.49f, 6.48f, 3.5f, 0.0f, -3.5f, -6.48f, -8.49f};
+
+SBGeoPoint3D DVElementActor::EyesPoint() const {
+    const DVPositionInterface& pos = sprite->pos;
+    SBGeoPoint3D e = pos.pos3D;
+    switch (pos.posture) {
+    case 1:
+        e.z += 46.0f;
+        break;
+    case 2:
+    case 0xe: {
+        int d = pos.direction & 0xf;
+        bool half = pos.u_b4 || (pos.sector && pos.sector->type & 3 && static_cast<DVSectorMotionArea*>(pos.sector)->flagC0);
+        float k = half ? 0.5f : 1.0f;
+        e.x += kCrawlX[d] * k;
+        e.y += kCrawlY[d] * k;
+        e.z += 2.0f;
+        break;
+    }
+    default:
+        if (pos.posture <= 0xd) e.z += 32.0f;
+        break;
+    }
+    return e;
+}
+
+void DVElementActor::DetectionPoints(SBGeoPoint3D& a, SBGeoPoint3D& b, SBGeoPoint3D& c) const {
+    const DVPositionInterface& pos = sprite->pos;
+    a = b = c = pos.pos3D;
+    switch (pos.posture) {
+    case 0: case 4: case 8: case 9: case 0xb: case 0xc: case 0xd:
+        a.z += 16.0f;
+        b.z += 32.0f;
+        c.z += 2.0f;
+        break;
+    case 1:
+        a.z += 30.0f;
+        b.z += 46.0f;
+        c.z += 16.0f;
+        break;
+    case 2:
+    case 0xe: {
+        int d = pos.direction & 0xf;
+        bool half = pos.u_b4 || (pos.sector && pos.sector->type & 3 && static_cast<DVSectorMotionArea*>(pos.sector)->flagC0);
+        float k = half ? 0.5f : 1.0f;
+        float dx = kCrawlX[d] * k, dy = kCrawlY[d] * k;
+        a.z += 2.0f;
+        b.x += dx; b.y += dy; b.z += 2.0f;
+        c.x -= dx; c.y -= dy; c.z += 2.0f;
+        break;
+    }
+    case 5: case 7: case 10:
+        a.z += 8.0f;
+        b.z += 16.0f;
+        c.z += 2.0f;
+        break;
+    case 6:
+        a.z += 30.0f;
+        b.z += 25.0f;
+        c.z += 20.0f;
+        break;
+    default:
+        break;
+    }
+}
+
+bool DVElementActor::SeesPoint(const SBGeoPoint3D& p, bool range) const {
+    const DVviewParameters& v = view;
+    if ((v.status | 8) == 8) return false;
+    SBGeoPoint3D e = EyesPoint();
+    SBGeoVector2D d(p.x - e.x, p.y - e.y);
+    if (range) {
+        float gy = d.y * 1.7434468f;
+        float dz = p.z - e.z;
+        if ((float)((int)v.length * (int)v.length) < dz * dz + gy * gy + d.x * d.x) return false;
+        if (SBDot(SBGeoVector2D(d.x, gy), v.dir) < 0.0f) return false;
+    }
+    // between the cone's two sides
+    if (SBDet(v.edgeL, d) < 0.0f) return false;
+    if (SBDet(v.edgeR, d) > 0.0f) return false;
+    DVFastFindGrid* grid = DVFastFindGrid::mpFastFindGrid;
+    return grid ? grid->IsReachable(e, p, true) : true;
+}
+
+// the cone's reach on the ground: the view is a sphere of the cone's length around the eyes (the
+// night's lights come with the night missions)
+float DVElementActor::ViewRadius(const SBGeoPoint3D& eyes) const {
+    float r2 = (float)((int)view.length * (int)view.length) - eyes.z * eyes.z;
+    return r2 > 0.0f ? std::sqrt(r2) : 0.0f;
+}
+
+// the hero's current command scales how fast he is noticed (running x4, walking x2, crawling
+// x0.4, ...)
+static float CommandFactor(uint32_t c) {
+    switch (c) {
+    case 3: case 4: case 8: case 10: case 0xb: case 0xe: case 0x19: case 0x1a: case 0x1c: case 0x1d:
+    case 0x1f: case 0x20: case 0x23: case 0x24: case 0x2c: case 0x2d:
+        return 2.0f;
+    case 5: case 0xc: case 0x15: case 0x2e: case 0x2f: case 0xc2:
+        return 4.0f;
+    case 9:
+        return 0.4f;
+    case 0xf: case 0x12: case 0x14: case 0x29: case 0x2a: case 0x2b: case 0x40: case 0x58: case 0x59: case 0x5a:
+        return 3.5f;
+    case 0x10: case 0x11:
+        return 2.5f;
+    case 0x13: case 0x77:
+        return 5.0f;
+    case 0x44: case 0x45:
+        return 3.0f;
+    case 0x54:
+        return 0.6f;
+    default:
+        if (c >= 0x30 && c <= 0x66 && c != 0x42 && c != 0x43 && c != 0x49 && c != 0x4a && c != 0x4b && c != 0x4c &&
+            c != 0x4d && c != 0x4e && c != 0x4f && c != 0x50 && c != 0x51 && c != 0x5d && c != 0x5e && c != 0x63)
+            return 2.0f;
+        return 1.0f;
+    }
+}
+
+uint8_t DVElementActor::DetectHero(const DVElementActor* hero, uint16_t& speed) const {
+    speed = 0;
+    if ((view.status | 8) == 8) return 0;
+    if (!hero || !hero->active) return 0;
+    const DVPositionInterface& hp = hero->sprite->pos;
+    if (hp.layer != sprite->pos.layer) return 0;
+    if (hp.posture == 3 || hp.posture == 0xe) return 0;
+    SBGeoPoint3D e = EyesPoint();
+    SBGeoPoint3D P = hp.pos3D;
+    SBGeoVector2D d(P.x - e.x, (P.y - e.y) * 1.7434468f);
+    float d2 = d.x * d.x + d.y * d.y;
+    if ((float)((int)view.length * (int)view.length) < d2 || SBDot(d, view.dir) < 0.0f) return 0;
+    if (d2 <= 225.0f) {
+        speed = 2000;
+        return 2;
+    }
+    float r = ViewRadius(e);
+    float r2 = r * r;
+    float identify2 = hero->CurrentCommand() == 0x54 ? 2500.0f : r2 * 0.25f;
+    if (r2 < d2) return 0;
+    SBGeoPoint3D a, b, c;
+    hero->DetectionPoints(a, b, c);
+    if (!SeesPoint(a, false) && !SeesPoint(b, false) && !SeesPoint(c, false)) return 0;
+    SBGeoVector3D t(P.x - e.x, P.y - e.y, P.z - e.z);
+    float f = (t.x * t.x + t.y * t.y + t.z * t.z) / (float)((int)view.length * (int)view.length);
+    if (f < 0.0f) f = 0.0f;
+    if (f > 1.0f) f = 1.0f;
+    float k = (1.0f - f) * (1.0f - f);
+    if (f < 0.25f) k *= (0.25f - f) * 8.0f + 1.0f;
+    uint8_t iq = 50;  // GetIQ: the character profile comes with the fights
+    float sp = k * (float)(iq * 3 + 400);
+    sp *= CommandFactor(hero->CurrentCommand());
+    speed = (uint16_t)(sp > 65535.0f ? 65535.0f : sp);
+    if (speed == 0) return 0;
+    return d2 < identify2 ? 2 : 1;
+}
+
+// ---- the view cone's colours (DVElementActorNPC::InitColors / InitCivilianColors) -----------
+// colours are 0xBBGGRR. Calm: green going yellow as the suspicion grows; suspicious: yellow going
+// red (and back); alarmed: red; pink: calming down after a fight.
+namespace {
+struct RGB8 {
+    uint8_t r = 0, g = 0, b = 0;
+};
+RGB8 gGreen[32], gYellow[32 * 32], gPink[32], gRed;
+RGB8 gCivGreen[32], gCivYellow[32], gCivRed;
+RGB8 Of(uint32_t c) { return {(uint8_t)(c & 0xff), (uint8_t)(c >> 8 & 0xff), (uint8_t)(c >> 16 & 0xff)}; }
+}  // namespace
+
+void DVElementActor::InitColors(uint32_t green, uint32_t yellow, uint32_t red, uint32_t pink) {
+    RGB8 G = Of(green), Y = Of(yellow), R = Of(red), P = Of(pink);
+    for (unsigned i = 0; i < 32; ++i) {
+        float t = (float)i / 36.0f, u = 1.0f - t;
+        gGreen[i] = {(uint8_t)(int)(Y.r * t + G.r * u), (uint8_t)(int)(Y.g * t + G.g * u), (uint8_t)(int)(Y.b * t + G.b * u)};
+        for (unsigned j = 0; j < 32 - i; ++j) {
+            float s = (float)j / 36.0f, v = u - s;
+            gYellow[i * 32 + j] = {(uint8_t)(int)(P.r * s + Y.r * v + R.r * t), (uint8_t)(int)(P.g * s + Y.g * v + R.g * t),
+                                   (uint8_t)(int)(P.b * s + Y.b * v + R.b * t)};
+        }
+        gPink[i] = {(uint8_t)(int)(R.r * t + P.r * u), (uint8_t)(int)(R.g * t + P.g * u), (uint8_t)(int)(R.b * t + P.b * u)};
+    }
+    gRed = R;
+    // the civilians' (fixed colours, InitCivilianColors(0xafffaf, 0xa0f8ff, 0x618eff))
+    RGB8 cg = Of(0xafffaf), cy = Of(0xa0f8ff), cr = Of(0x618eff);
+    for (unsigned i = 0; i < 32; ++i) {
+        float t = (float)i / 36.0f, u = 1.0f - t;
+        gCivGreen[i] = {(uint8_t)(int)(cy.r * t + cg.r * u), (uint8_t)(int)(cy.g * t + cg.g * u), (uint8_t)(int)(cy.b * t + cg.b * u)};
+        gCivYellow[i] = {(uint8_t)(int)(cr.r * t + cy.r * u), (uint8_t)(int)(cr.g * t + cy.g * u), (uint8_t)(int)(cr.b * t + cy.b * u)};
+    }
+    gCivRed = cr;
+}
+
+void DVElementActor::GetAlertColor(uint8_t& r, uint8_t& g, uint8_t& b) const {
+    RGB8 c{0xff, 0xff, 0xff};
+    const DVArtificialIntelligence* a = ai.get();
+    if (!detecting && a) {
+        if (view.status == 8) {
+            // the eyes closing: red, darker as the cone shrinks
+            float f = (float)view.radiusNow / (float)DVArtificialIntelligence::muwStandardViewPolygonRadius;
+            f *= f;
+            c = {(uint8_t)(int)(gRed.r * f), (uint8_t)(int)(gRed.g * f), (uint8_t)(int)(gRed.b * f)};
+        } else if (!a->IsVillain()) {
+            switch (view.alert) {
+            case 0: c = gCivGreen[std::min(31, a->suspect >> 8)]; break;
+            case 1: c = gCivYellow[std::min(31, a->yellow >> 8)]; break;
+            case 2: c = gCivRed; break;
+            case 3: case 4: c = gCivYellow[20]; break;
+            default: break;
+            }
+        } else {
+            switch (view.alert) {
+            case 0: c = gGreen[std::min(31, std::max(a->u24e >> 9, a->suspect >> 8))]; break;
+            case 1: c = gYellow[std::min(31, a->yellow >> 8) * 32 + std::min(31, a->yellowBack >> 8)]; break;
+            case 2: c = gRed; break;
+            case 3: case 4: c = gYellow[0]; break;
+            case 5: {
+                int k = (a->yellowBack >> 8) == 0x20 ? 0 : 0x1f - (a->yellowBack >> 8);
+                c = gPink[std::max(0, std::min(31, k))];
+                break;
+            }
+            default: break;
+            }
+        }
+    }
+    r = c.r;
+    g = c.g;
+    b = c.b;
+}
+
+// DVElementActorNPC::RefreshDetection, the heroes: each one seen grows the suspicion (+0x246);
+// when it is full, the brain gets "I see him" (and "I know who it is" when he is near enough)
+void DVElementActor::RefreshDetection() {
+    DVArtificialIntelligence* b = ai.get();
+    if (!b || sprite->pos.posture == 0xe || knockedOut) return;
+    detecting = false;
+    // an NPC driven by a level script gets its stimuli through the script's FilterEvent first (the
+    // gate guard of mission 2 talks to Cooper instead of raising the alarm): until the script engine
+    // runs them, these NPCs do not react to what they see
+    if (!scriptName.empty()) return;
+    DVEngine* e = DVEngine::mpEngine;
+    if (!e) return;
+    const std::vector<DVElementActor*>& heroes = e->Heroes();
+    uint16_t best = 0;
+    int bestHero = -1;
+    uint8_t bestLevel = 0;
+    for (size_t i = 0; i < heroes.size(); ++i) {
+        uint16_t sp = 0;
+        uint8_t lvl = DetectHero(heroes[i], sp);
+        if (lvl) {
+            if (sp > best) {
+                best = sp;
+                bestHero = (int)i;
+                bestLevel = lvl;
+            }
+            if (b->alertStatus == 0) {
+                if (b->suspect > 0x1a00) sp = (uint16_t)(sp * 3);
+                uint32_t s2 = (uint32_t)b->suspect + sp;
+                b->suspect = (uint16_t)(s2 > 0xffff ? 0xffff : s2);
+            } else {
+                b->UpdateDetection((uint8_t)i, lvl, heroes[i]);
+            }
+        } else {
+            b->UpdateDetection((uint8_t)i, 0, heroes[i]);
+        }
+    }
+    if (b->alertStatus == 0) {
+        if (b->suspect >= 0x2000) {
+            b->suspect = 0x1fff;
+            if (bestHero >= 0) b->UpdateDetection((uint8_t)bestHero, bestLevel, heroes[bestHero]);
+        } else if (best == 0) {
+            uint16_t s = b->suspect;
+            b->suspect = s < 9 ? 0 : (uint16_t)(s - (s < 0x1001 ? 8 : 3));
+        }
+    }
 }
 
 // DVArtificialIntelligence::InitState: the starting state given by the level
@@ -846,6 +1159,7 @@ void DVElementActor::NPCHourglass() {
         b->SequenceDone(true, false);
     }
     RefreshView();
+    RefreshDetection();
     uint32_t now = *DVArtificialIntelligence::mpUniversalFrameCounter;
     if (sprite->pos.posture != 0xe && ((now - frameOffset) & 0xf) == 0) b->The16thFrame((uint8_t)(now - frameOffset));
     b->Hourglass();

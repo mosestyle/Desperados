@@ -49,6 +49,7 @@ public:
 
     uint32_t flags = 3;            // +0: 1 = blocks sight, 2 = ?, 4 = can be stood on (view area), 8
     uint32_t serial = 0;           // +4
+    bool enabled = true;           // +8 (patches switch obstacles on and off)
     SBGeoVector3D box3dMin, box3dMax;  // +0xc
     SBGeoBoundingBox2D box;        // +0x24: ground box
     SBGeoBoundingBox2D boxScreen;  // +0x38: box on the picture (with heights)

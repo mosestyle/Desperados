@@ -403,8 +403,137 @@ int DVFastFindGrid::LoadSightObstaclesFromFile(SBFile& f) {
             AddSector(plane);
         }
         layers[0].obstacles.push_back(o);
+        // into the cells under its ground box
+        if (gridW && gridH) {
+            if (obstacleCells.size() < (size_t)gridW * gridH) obstacleCells.resize((size_t)gridW * gridH);
+            int x0 = CellClamp(o->box.p0.x, gridW), y0 = CellClamp(o->box.p0.y, gridH);
+            int x1 = CellClamp(o->box.p1.x, gridW), y1 = CellClamp(o->box.p1.y, gridH);
+            for (int y = y0; y <= y1; ++y)
+                for (int x = x0; x <= x1; ++x) obstacleCells[(size_t)y * gridW + x].push_back(o);
+        }
     }
     return n;
+}
+
+// DVFastFindGrid::GetObstacles (0x082b35a0 with the cell part 0x082b3190), each obstacle once
+void DVFastFindGrid::GetObstacles(std::vector<DVSightObstacle*>& out, uint16_t layer, const SBGeoBoundingBox2D& b,
+                                  uint32_t type) const {
+    (void)layer;
+    if (obstacleCells.empty()) return;
+    int x0 = CellClamp(b.p0.x < b.p1.x ? b.p0.x : b.p1.x, gridW), y0 = CellClamp(b.p0.y < b.p1.y ? b.p0.y : b.p1.y, gridH);
+    int x1 = CellClamp(b.p0.x < b.p1.x ? b.p1.x : b.p0.x, gridW), y1 = CellClamp(b.p0.y < b.p1.y ? b.p1.y : b.p0.y, gridH);
+    for (int y = y0; y <= y1; ++y)
+        for (int x = x0; x <= x1; ++x)
+            for (DVSightObstacle* o : obstacleCells[(size_t)y * gridW + x]) {
+                if (!o->enabled || (o->flags & type) != type) continue;
+                bool seen = false;
+                for (DVSightObstacle* q : out)
+                    if (q == o) {
+                        seen = true;
+                        break;
+                    }
+                if (!seen) out.push_back(o);
+            }
+}
+
+// DVFastFindGrid::ComputeRayEquation (0x082b4b40): the ray's height as a function of x (returns
+// true) or of y, whichever moves more
+static bool ComputeRayEquation(const SBGeoPoint3D& a, const SBGeoPoint3D& b, float& k, float& c) {
+    float dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
+    bool useX;
+    if (dx <= 0.0f) {
+        if (dy > 0.0f) useX = dy < -dx;
+        else useX = !(dy <= dx);
+    } else if (dy <= 0.0f) {
+        useX = -dy < dx;
+    } else {
+        useX = dy < dx;
+    }
+    if (useX) {
+        k = dz / dx;
+        c = a.z - k * a.x;
+        return true;
+    }
+    k = dz / dy;
+    c = a.z - k * a.y;
+    return false;
+}
+
+// the crossing point of two segments (SBGeoSegment2D::operator^, SBGeoIntersection2D type 1)
+static bool SegmentCrossing(const SBGeoSegment2D& s, const SBGeoSegment2D& t, SBGeoPoint2D& out) {
+    float rx = s.b.x - s.a.x, ry = s.b.y - s.a.y;
+    float qx = t.b.x - t.a.x, qy = t.b.y - t.a.y;
+    float den = rx * qy - ry * qx;
+    if (den == 0.0f) return false;
+    float u = ((t.a.x - s.a.x) * qy - (t.a.y - s.a.y) * qx) / den;
+    out = SBGeoPoint2D(s.a.x + rx * u, s.a.y + ry * u);
+    return true;
+}
+
+bool DVFastFindGrid::IsReachable(const SBGeoPoint3D& p1, const SBGeoPoint3D& p2, bool shot) const {
+    if ((p1.z > 0.0f && p2.z < 0.0f) || (p1.z < 0.0f && p2.z > 0.0f)) return false;
+    SBGeoSegment2D seg(SBGeoPoint2D(p1.x, p1.y), SBGeoPoint2D(p2.x, p2.y));
+    SBGeoBoundingBox2D sb;
+    sb.Expand(seg.a);
+    sb.Expand(seg.b);
+    std::vector<DVSightObstacle*> obs;
+    GetObstacles(obs, 0, sb, shot ? 2 : 1);
+    return IsReachable(p1, p2, obs);
+}
+
+bool DVFastFindGrid::IsReachable(const SBGeoPoint3D& p1, const SBGeoPoint3D& p2,
+                                 const std::vector<DVSightObstacle*>& obs) const {
+    if ((p1.z > 0.0f && p2.z < 0.0f) || (p1.z < 0.0f && p2.z > 0.0f)) return false;
+    SBGeoSegment2D seg(SBGeoPoint2D(p1.x, p1.y), SBGeoPoint2D(p2.x, p2.y));
+    bool needRay = true;
+    bool byX = false;
+    float k = 0, c = 0;
+    for (DVSightObstacle* o : obs) {
+        if (!SBIntersects(o->box, seg)) continue;
+        const SBGeoPlane3D& top = o->plane;
+        float t1 = p1.z - top.ComputeZ(p1.x, p1.y);
+        float t2 = p2.z - top.ComputeZ(p2.x, p2.y);
+        if (t1 > 0.0f && t2 > 0.0f) continue;  // both above the top
+        bool floating = !o->flat;
+        float g1 = 0, g2 = 0;
+        if (floating) {
+            const SBGeoPlane3D& bot = o->planeGround;
+            g1 = p1.z - bot.ComputeZ(p1.x, p1.y);
+            g2 = p2.z - bot.ComputeZ(p2.x, p2.y);
+            if (g1 < 0.0f && g2 < 0.0f) continue;  // both under it
+        }
+        size_t n = o->points.size();
+        if (n == 0) continue;
+        if (needRay && (!floating ? (t1 > 0.0f || t2 > 0.0f) : (t1 > 0.0f || t2 > 0.0f || g1 < 0.0f || g2 < 0.0f))) {
+            byX = ComputeRayEquation(p1, p2, k, c);
+            needRay = false;
+        }
+        SBGeoPoint2D prev(o->points[n - 1].x, o->points[n - 1].y);
+        for (size_t i = 0; i < n; ++i) {
+            SBGeoPoint2D cur(o->points[i].x, o->points[i].y);
+            SBGeoSegment2D edge(prev, cur);
+            if (SBIntersects(seg, edge)) {
+                // the whole ray between the obstacle's bottom and top: blocked
+                if (!floating ? (t1 <= 0.0f && t2 <= 0.0f) : (t2 <= 0.0f && g1 >= 0.0f && g2 >= 0.0f && t1 <= 0.0f)) return false;
+                SBGeoPoint2D x;
+                if (SegmentCrossing(seg, edge, x)) {
+                    float z = k * (byX ? x.x : x.y) + c;
+                    if (z <= top.ComputeZ(x.x, x.y) && (!floating || o->planeGround.ComputeZ(x.x, x.y) <= z)) return false;
+                }
+            }
+            prev = cur;
+        }
+        // the ray goes through the top (or the bottom) inside the outline
+        if ((t2 <= 0.0f && t1 > 0.0f) || (t1 <= 0.0f && t2 > 0.0f)) {
+            SBGeoPoint2D q = seg.a + (seg.b - seg.a) * (t1 / (t1 - t2));
+            if (o->box.IsInside_p(q) && o->polygon.IsInside_p(q)) return false;
+        }
+        if (floating && ((g2 >= 0.0f && g1 < 0.0f) || (g1 >= 0.0f && g2 < 0.0f))) {
+            SBGeoPoint2D q = seg.a + (seg.b - seg.a) * (g1 / (g1 - g2));
+            if (o->box.IsInside_p(q) && o->polygon.IsInside_p(q)) return false;
+        }
+    }
+    return true;
 }
 
 // DVFastFindGrid::LoadMaskFromFile (0x082c3260)
@@ -447,6 +576,25 @@ void DVFastFindGrid::AddMask(DVMask* m, uint16_t layer, bool keep) {
             size_t idx = ((size_t)y + (size_t)layer * gridH) * gridW + x;
             if (idx >= maskCells.size()) maskCells.resize(idx + 1);
             maskCells[idx].push_back(m);
+        }
+}
+
+void DVFastFindGrid::GetMasks(std::vector<DVMask*>& out, uint16_t layer, const SBGeoBoundingBox2D& b) const {
+    auto cell = [](float v, int n) -> int {
+        int16_t c = (int16_t)((int16_t)(int)v >> 6);
+        if (c < 0) return 0;
+        return c < n ? c : n - 1;
+    };
+    int x0 = cell(b.p0.x, gridW), y0 = cell(b.p0.y, gridH);
+    int x1 = cell(b.p1.x, gridW), y1 = cell(b.p1.y, gridH);
+    for (int y = y0; y <= y1; ++y)
+        for (int x = x0; x <= x1; ++x) {
+            size_t idx = ((size_t)y + (size_t)layer * gridH) * gridW + x;
+            if (idx >= maskCells.size()) continue;
+            for (DVMask* m : maskCells[idx]) {
+                if (!m->active || (m->type & 1) != 1) continue;
+                if (std::find(out.begin(), out.end(), m) == out.end()) out.push_back(m);
+            }
         }
 }
 

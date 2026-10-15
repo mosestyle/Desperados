@@ -29,4 +29,6 @@ public:
     uint8_t operator[](unsigned i) const { return i < data.size() ? data[i] : 0; }
     bool IsAppliedToPointCharacter(const SBGeoPoint2D& p) const;
     bool IsAppliedToBox(const SBGeoBoundingBox2D& b) const;
+    // is the map pixel (x, y) one of the mask's? (the bitmap as DVSprite::DrawMaskOverSprite reads it)
+    bool Covers(int x, int y) const;
 };

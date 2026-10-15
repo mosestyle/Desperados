@@ -174,9 +174,29 @@ public:
     void GlanceAt(const DVposition& p, uint32_t frames);  // 0x08236130
     void RestoreView();                // the end of a glance (NPC Hourglass, AI +0x234)
     void DontFixDirectionOnViewTarget();  // 0x0822d820
+    // DVElementActorNPC::SetViewTarget (0x0822d590 / 0x0822d140): the cone follows an element
+    // (status 6 / 7) or looks at a place (4 / 5); `turn`: the body turns to it too
+    void SetViewTarget(DVElement* e, bool turn);
+    void SetViewTarget(const SBGeoPoint2D& p, bool turn);
     void RefreshView();                // 0x0822d860
     void NPCHourglass();               // 0x082351e0
     bool StepOrders();
+    // ---- sight (DVElementActorHuman / DVElementActorNPC) --------------------------------------
+    SBGeoPoint3D EyesPoint() const;    // ComputeEyesPoint (0x08223440), the current posture
+    // ComputeDetectionPoints (0x082236b0): feet / body / head (lying: along the body)
+    void DetectionPoints(SBGeoPoint3D& a, SBGeoPoint3D& b, SBGeoPoint3D& c) const;
+    // IsDetecting(SBGeoPoint3D&, bool) (0x08233fd0): inside the cone and nothing in between
+    bool SeesPoint(const SBGeoPoint3D& p, bool range) const;
+    float ViewRadius(const SBGeoPoint3D& eyes) const;  // ComputeViewRadius (0x08233490), the ground
+    // IsDetecting(DVElementActorHuman*, ...) (0x082323e0): 0 not seen, 1 seen, 2 seen near enough
+    // to be identified; `speed` how fast the suspicion grows
+    uint8_t DetectHero(const DVElementActor* hero, uint16_t& speed) const;
+    void RefreshDetection();           // 0x0822eae0 (the heroes' part)
+    bool detecting = false;            // +0x23f a stimulus was just sent: the cone flashes white
+    void ResetDazzlingImmunity() {}    // 0x0823acf0 (the mirror's blinding comes with the fights)
+    // DVElementActorNPC::GetAlertColor (0x08234b40): the view cone's colour
+    void GetAlertColor(uint8_t& r, uint8_t& g, uint8_t& b) const;
+    static void InitColors(uint32_t green, uint32_t yellow, uint32_t red, uint32_t pink);  // 0x0822b6a0
 };
 
 class DVElementObject : public DVElement {

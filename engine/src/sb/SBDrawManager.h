@@ -66,6 +66,10 @@ public:
     bool BlitAlphaConstant(uint32_t src, const SBGeoBoundingBox2D* srcBox, uint32_t dst, const SBGeoBoundingBox2D* dstBox,
                            uint16_t percent, uint32_t flags);
     void Fill(uint32_t dst, const SBGeoBoundingBox2D* box, uint16_t color, uint32_t flags);
+    // coloured triangles blended over a surface: 6 floats a vertex (x, y in its pixels, r, g, b, a
+    // from 0 to 1, interpolated). `pattern`: only every other pixel, as a checkerboard (the
+    // original's DVShadowPolygon::DrawVerticalLinePattern16)
+    void DrawTriangles(uint32_t dst, const std::vector<float>& xyrgba, bool pattern);
 
     // the screen's texture for the app (GL name) and size
     unsigned ScreenTexture() const;
@@ -88,6 +92,8 @@ private:
     std::map<uint32_t, Surface> surfaces;
     uint32_t nextId = 2;
     unsigned prog = 0, vao = 0, vbo = 0;
+    unsigned triProg = 0, triVao = 0, triVbo = 0;
+    int uTriTarget = -1, uTriPattern = -1;
     int uDst = -1, uSrc = -1, uTarget = -1, uColorKey = -1, uAlphaKey = -1, uConst = -1, uAlphaConst = -1,
         uTexRGB = -1, uTexAlpha = -1, uUseColorKey = -1, uUseAlpha = -1, uAlphaRed = -1;
 

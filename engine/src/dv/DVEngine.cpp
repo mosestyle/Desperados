@@ -2,6 +2,7 @@
 
 #include "dv/DVArtificialIntelligence.h"
 #include "dv/DVHikingGuide.h"
+#include "dv/DVShadowPolygon.h"
 
 #include <algorithm>
 #include <cmath>
@@ -26,7 +27,10 @@ DVEngine::DVEngine(SBDrawManager* d) : draw(d) {
     pathFinder.reset(new DVPathFinder());
     pathFinder->SetObstacles(grid.get());
     hiking.reset(new DVHikingGuide());
+    shadow.reset(new DVShadowPolygon());
     DVSector::ResetCounters();
+    DVArtificialIntelligence::mCurrentOverallAlertStatus = 0;
+    DVArtificialIntelligence::mCurrentOverallVillainAlertStatus = 0;
 }
 
 DVEngine::~DVEngine() {
@@ -129,6 +133,7 @@ int DVEngine::LoadMiscFromFile(SBFile& f) {
     coneColors[0] = f.U32();
     coneColors[1] = f.U32();
     coneColors[2] = f.U32();
+    DVElementActor::InitColors(coneColors[0], coneColors[1], coneColors[2], 0xffa0ff);
     f.U8();
     DVArtificialIntelligence::muwStandardViewPolygonRadius = f.U16();
     hearingFactor = f.F32();
@@ -286,6 +291,23 @@ DVElementActor* DVEngine::HeroAt(const SBGeoPoint2D& p, float slack) const {
     return best;
 }
 
+DVElementActor* DVEngine::NPCAt(const SBGeoPoint2D& p, float slack) const {
+    DVElementActor* best = nullptr;
+    for (DVElementActor* n : npcs) {
+        if (!n->active || !n->sprite) continue;
+        DVSprite* s = n->sprite.get();
+        SBGeoBoundingBox2D b = s->boxOnMap;
+        if (!b.valid) continue;
+        b.p0 = b.p0 - SBGeoVector2D(slack, slack);
+        b.p1 = b.p1 + SBGeoVector2D(slack, slack);
+        if (!b.IsInside_p(p)) continue;
+        if (!best || best->sprite->displayOrder < s->displayOrder) best = n;
+    }
+    return best;
+}
+
+void DVEngine::ToggleWatched(DVElementActor* n) { watched = watched == n ? nullptr : n; }
+
 bool DVEngine::OrderMove(const SBGeoPoint2D& p, bool run) {
     if (!selected) return false;
     return selected->MoveTo(p, run);
@@ -312,6 +334,9 @@ void DVEngine::Draw() {
     SBGeoBoundingBox2D src(cam, cam + view);
     SBGeoBoundingBox2D dst(SBGeoPoint2D(0, 0), SBGeoPoint2D(screen.x, screen.y));
     draw->Blit(background, &src, 1, &dst, 0);
+    // the watched NPC's view cone, over the ground and under the characters
+    // (PerformRefreshAllElements: after the flat items, ShowDetectionPolygon)
+    if (watched && shadow) shadow->Display(1, cam, zoom, watched, night);
     PerformRefreshAllElements(1);
 }
 

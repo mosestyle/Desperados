@@ -89,3 +89,34 @@ bool DVMask::IsAppliedToBox(const SBGeoBoundingBox2D& b) const {
     if (IsAppliedToPointCharacter(b.p0)) return true;
     return IsAppliedToPointCharacter(b.p0 + SBGeoVector2D(b.p1.x - b.p0.x, 0));
 }
+
+// the bitmap: per row a length byte, then runs: a control byte c, c & 0x7f groups of 8 pixels,
+// either one data byte repeated (bit 7) or that many data bytes; highest bit = leftmost pixel
+bool DVMask::Covers(int x, int y) const {
+    int lx = x - (int)box.p0.x, ly = y - (int)box.p0.y;
+    if (lx < 0 || ly < 0 || lx >= (int)(box.p1.x - box.p0.x) || ly >= (int)(box.p1.y - box.p0.y)) return false;
+    size_t base = 0;
+    for (int i = 0; i < ly; ++i) {
+        if (base >= data.size()) return false;
+        base += 1 + (size_t)data[base];
+    }
+    if (base >= data.size()) return false;
+    size_t pos = base + 1, end = base + 1 + data[base];
+    int col = 0;
+    while (pos < end && pos < data.size()) {
+        uint8_t c = data[pos++];
+        int n = c & 0x7f;
+        if (c & 0x80) {
+            uint8_t b = (*this)[(unsigned)pos++];
+            if (lx < col + n * 8) return (b >> (7 - (lx - col) % 8)) & 1;
+        } else {
+            if (lx < col + n * 8) {
+                uint8_t b = (*this)[(unsigned)(pos + (lx - col) / 8)];
+                return (b >> (7 - (lx - col) % 8)) & 1;
+            }
+            pos += n;
+        }
+        col += n * 8;
+    }
+    return false;
+}

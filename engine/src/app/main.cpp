@@ -1,8 +1,8 @@
 // The app: window, GL context, the player's game folder, then a mission run by the engine.
 // Drag / flick / pinch move the view. Tap a hero to select him, tap the ground to walk there,
-// tap twice to run (the original's click / double click). The buttons on the left select the
-// heroes, the one on the right makes the hero lie down / stand up. Arrows at the top switch
-// between the missions.
+// tap twice to run (the original's click / double click), tap an NPC to show / hide his view
+// cone. The buttons on the left select the heroes, the one on the right makes the hero lie
+// down / stand up. Arrows at the top switch between the missions.
 #include <SDL.h>
 
 #include <GLES3/gl3.h>
@@ -188,6 +188,11 @@ int main(int argc, char** argv) {
                 engine->Select(h);
                 return;
             }
+        }
+        // an enemy or a civilian: show / hide his view cone (the original's "watch" tool)
+        if (DVElementActor* n = engine->NPCAt(mp, slack)) {
+            engine->ToggleWatched(n);
+            return;
         }
         Uint32 now = SDL_GetTicks();
         bool twice = now - lastGroundTap < 400 && std::hypot(sx - lastTapX, sy - lastTapY) < sh * 0.06f;

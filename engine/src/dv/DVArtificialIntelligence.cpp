@@ -455,10 +455,100 @@ void DVArtificialIntelligence::BreakMacro() {
 
 // DVArtificialIntelligence::SetAlertStatus, the brain's part (the overall alert and the music
 // come with the alarms)
+// the alert statuses' levels (DAT_08558d40): calm 0, suspicious 1, alarmed 2
+static uint32_t AlertLevel(uint32_t a) {
+    static const uint32_t k[6] = {0, 1, 2, 1, 0, 1};
+    return a < 6 ? k[a] : 2;
+}
+uint32_t DVArtificialIntelligence::mCurrentOverallAlertStatus = 0;
+uint32_t DVArtificialIntelligence::mCurrentOverallVillainAlertStatus = 0;
+
 void DVArtificialIntelligence::SetAlertStatus(uint32_t alert, bool force) {
-    (void)force;
+    (void)force;  // forces the calm music (the sound comes with step 5)
+    uint32_t old = alertStatus;
+    uint32_t oldLevel = AlertLevel(old);
+    if (old != alert) {
+        bool common = true;
+        switch (alert) {
+        case 0:
+            suspect = 0x1fff;   // calm again, but still wary
+            yellow = 0;
+            yellowBack = 0;
+            npc->ResetDazzlingImmunity();
+            common = false;
+            break;
+        case 1:
+            suspect = 0x2000;
+            if (old == 5) {
+                yellow = (uint16_t)(0x1fff - yellowBack);
+                u24e = 0;
+                yellowBack--;
+                common = false;
+            } else if (old == 2) {
+                yellowBack = 0;
+                yellow = 0x1fff;
+            } else if (old == 0) {
+                yellowBack = 0;
+                yellow = 0;
+            } else {
+                common = false;
+            }
+            break;
+        case 2:
+            suspect = 0x2000;
+            yellow = 0x2000;
+            yellowBack = 0;
+            u24e = 0;
+            common = false;
+            break;
+        case 3:
+            suspect = 0x2000;
+            yellow = old == 0 ? 0 : 0x1fff;
+            yellowBack = 0;
+            break;
+        case 5:
+            suspect = 0x2000;
+            yellowBack = (uint16_t)(0x1fff - yellow);
+            break;
+        default:
+            common = false;
+            break;
+        }
+        if (common) u24e = 0;
+    }
     alertStatus = alert;
     npc->view.alert = alert;
+    uint32_t level = AlertLevel(alert);
+    DVEngine* e = DVEngine::mpEngine;
+    // the villains' overall status: the highest of them (for the music)
+    uint32_t v = level;
+    if (level <= mCurrentOverallVillainAlertStatus) {
+        v = mCurrentOverallVillainAlertStatus;
+        if (level < oldLevel && oldLevel == mCurrentOverallVillainAlertStatus && e) {
+            v = level;
+            for (DVElementActor* n : e->NPCs()) {
+                if (!n->ai || !n->ai->IsVillain()) continue;
+                uint32_t l = AlertLevel(n->ai->alertStatus);
+                if (l > v) v = l;
+                if (v == oldLevel) break;
+            }
+        }
+    }
+    mCurrentOverallVillainAlertStatus = v;
+    // everyone's: when it rises, the view cone of the one who raised it is shown
+    if (mCurrentOverallAlertStatus < level) {
+        mCurrentOverallAlertStatus = level;
+        if (attitude > 1 && e) e->watched = npc;
+    } else if (level < oldLevel && oldLevel == mCurrentOverallAlertStatus && e) {
+        uint32_t o = level;
+        for (DVElementActor* n : e->NPCs()) {
+            if (!n->ai) continue;
+            uint32_t l = AlertLevel(n->ai->alertStatus);
+            if (l > o) o = l;
+            if (o == oldLevel) break;
+        }
+        mCurrentOverallAlertStatus = o;
+    }
 }
 
 // the brain's part of DVElementActorNPC::Hourglass: the timers and the stimuli kept for later
@@ -491,6 +581,49 @@ void DVArtificialIntelligence::SequenceDone(bool move, bool failed) {
     if (!move) return;
     DVStimulus s = DVStimulus::Of(failed ? STIM_FAILED : STIM_REACHED);
     Think(s);
+}
+
+// DVArtificialIntelligence::UpdateDetection: hero i is now seen (1), identified (2) or not seen
+// (0); the brain hears of each change: "I see someone" (0), "I know him" (1), "he's gone" (2)
+void DVArtificialIntelligence::UpdateDetection(uint8_t i, uint8_t level, DVElement* hero) {
+    if (detections.size() <= i) detections.resize((size_t)i + 1, 0);
+    uint8_t old = detections[i];
+    if (old == 3) return;
+    if (level != 1 || old != 2) detections[i] = level;
+    if (level != 0) lastSeen = Now();
+    if (old == level) return;
+    npc->detecting = true;   // the cone flashes white
+    if (old == 0) {
+        DVStimulus s = DVStimulus::Of(STIM_VIEW);
+        s.element = hero;
+        s.source = 3;
+        Think(s);
+    }
+    if (level == 2) {
+        DVStimulus s = DVStimulus::Of(STIM_IDENTIFY);
+        s.element = hero;
+        s.source = 3;
+        Think(s);
+    } else if (level == 0) {
+        if (hero && hero->sprite) {
+            lastKnown.p = hero->sprite->pos.posMap;
+            lastKnown.sector = hero->sprite->pos.sector;
+            lastKnown.layer = (int16_t)hero->sprite->pos.layer;
+        }
+        DVStimulus s = DVStimulus::Of(STIM_LOST);
+        s.element = hero;
+        s.source = 3;
+        Think(s);
+    }
+}
+
+// DVArtificialMalignity::React, the waiting part: stops, and thinks again after a moment (the
+// character profile's quickness comes with the fights)
+void DVArtificialIntelligence::React(uint16_t frames, bool b) {
+    int r = frames ? (desprand() % frames) + frames / 2 : 1;
+    (void)b;
+    LaunchTimer((uint32_t)r);
+    npc->Halt();
 }
 
 // the arrival on a route's waypoint (state 2, substates 0x7a / 0x7f), shared by both brains:
@@ -702,6 +835,48 @@ bool DVArtificialMalignity::DefaultBoredStandardProcedure() {
     return false;
 }
 
+// DVArtificialMalignity::EventViewStandardProcedure: a villain sees someone. A hero he does not
+// know yet makes him suspicious (state 3, the yellow cone): he stops, faces him and watches; the
+// hostile ones (attitude 4) know at once
+void DVArtificialMalignity::EventViewStandardProcedure(DVElement* e) {
+    BreakMacro();
+    if (attitude - 1u < 2) {
+        if (drunk > 0x32) {
+            npc->GlanceAt(Position(), 0x1e);
+            return;
+        }
+        SetState(3, 0xf);
+        target = e;
+        SetAlertStatus(1, false);
+        if (e && e->sprite) Face(e->sprite->pos.posMap, false);
+        npc->SetViewTarget(e, true);
+        npc->SetViewCone(8);
+        React(10, true);
+        return;
+    }
+    if (attitude != 4) return;
+    SetAlertStatus(1, false);
+    DVEngine* eng = DVEngine::mpEngine;
+    if (eng)
+        for (size_t i = 0; i < eng->Heroes().size(); ++i)
+            if (eng->Heroes()[i] == e) UpdateDetection((uint8_t)i, 2, e);
+}
+
+// DVArtificialMalignity::EventIdentifyStandardProcedure: he knows who it is: the alarm (the red
+// cone); he faces the hero and keeps him in sight (calling his friends, shooting and chasing come
+// with the fights)
+void DVArtificialMalignity::EventIdentifyStandardProcedure(DVElement* e) {
+    BreakMacro();
+    if (attitude != 4 && attitude != 2) return;
+    SetAlertStatus(2, false);
+    npc->SetViewTarget(e, true);
+    npc->SetViewCone(0xb);
+    target = e;
+    SetState(10, 0);
+    if (e && e->sprite) Face(e->sprite->pos.posMap, false);
+    React(10, true);
+}
+
 // DVArtificialMalignity::Think, the patrol part of state 2
 bool DVArtificialMalignity::Think(DVStimulus& s) {
     if (!StartThink(s)) {
@@ -709,6 +884,37 @@ bool DVArtificialMalignity::Think(DVStimulus& s) {
         return true;
     }
     uint32_t type = s.type;
+    if (type == STIM_VIEW && state <= 4 && state != 0) {
+        EventViewStandardProcedure(s.element);
+        EndThink();
+        return true;
+    }
+    if (type == STIM_IDENTIFY && state != 0) {
+        EventIdentifyStandardProcedure(s.element);
+        EndThink();
+        return true;
+    }
+    if (state == 3 || state == 10) {
+        // watching / alarmed: while he still sees the hero he keeps watching; once he has lost
+        // him for a while he goes back to his duty
+        if (type == STIM_TIMER) {
+            bool sees = false;
+            for (uint8_t d : detections) sees |= d != 0;
+            if (sees) {
+                React(25, false);
+            } else if (Now() - lastSeen > (state == 10 ? 250u : 100u)) {
+                SetAlertStatus(0, false);
+                suspect = 0;
+                npc->SetViewCone(1);
+                ReturnToDutyStandardProcedure();
+            } else {
+                if (state == 3) npc->GlanceAt(lastKnown, 0x1e);
+                React(25, false);
+            }
+        }
+        EndThink();
+        return true;
+    }
     if (state == AI_NORMAL) {
         switch (type) {
         case STIM_VIEW:
@@ -881,6 +1087,46 @@ void DVArtificialBonhomie::ReturnToDutyStandardProcedure() {
     SetState(AI_NORMAL, SUB_ON_ROUTE);
 }
 
+// DVArtificialBonhomie::EventViewStandardProcedure: a civilian sees a hero: most only glance at
+// him; the suspicious ones (attitude 1) become wary (4), the wary ones tell (identify)
+void DVArtificialBonhomie::EventViewStandardProcedure(DVElement* e) {
+    if (!e || !e->sprite) return;
+    switch (attitude) {
+    case 0:
+        npc->GlanceAt(Position(), 0x14);
+        npc->view.target = e->sprite->pos.posMap;
+        break;
+    case 1:
+        attitude = 4;
+        break;
+    case 3:
+        npc->GlanceAt(Position(), 0x14);
+        npc->view.target = e->sprite->pos.posMap;
+        break;
+    case 4: {
+        SetAlertStatus(1, false);
+        BreakMacro();
+        DVEngine* eng = DVEngine::mpEngine;
+        if (eng)
+            for (size_t i = 0; i < eng->Heroes().size(); ++i)
+                if (eng->Heroes()[i] == e) UpdateDetection((uint8_t)i, 2, e);
+        break;
+    }
+    default:
+        break;
+    }
+}
+
+// DVArtificialBonhomie::EventIdentifyStandardProcedure: a wary civilian runs to tell a villain
+// (RunToYourBigBrother comes with the alarms; for now he stays alarmed and watches)
+void DVArtificialBonhomie::EventIdentifyStandardProcedure(DVElement* e) {
+    if (attitude != 4) return;
+    SetAlertStatus(1, false);
+    BreakMacro();
+    lastKnown = Position();
+    npc->SetViewTarget(e, true);
+}
+
 // DVArtificialBonhomie::Think, the patrol part of state 2
 bool DVArtificialBonhomie::Think(DVStimulus& s) {
     if (!StartThink(s)) {
@@ -892,6 +1138,16 @@ bool DVArtificialBonhomie::Think(DVStimulus& s) {
         return true;
     }
     uint32_t type = s.type;
+    if (state == AI_NORMAL && type == STIM_VIEW) {
+        EventViewStandardProcedure(s.element);
+        EndThink();
+        return true;
+    }
+    if (state == AI_NORMAL && type == STIM_IDENTIFY) {
+        EventIdentifyStandardProcedure(s.element);
+        EndThink();
+        return true;
+    }
     if (state == AI_NORMAL) {
         switch (type) {
         case STIM_REACHED:

@@ -17,6 +17,7 @@ class DVFastFindGrid;
 class DVFrameHolder;
 class DVPathFinder;
 class DVHikingGuide;
+class DVShadowPolygon;
 
 class DVEngine {
 public:
@@ -74,6 +75,15 @@ public:
     void OrderStop();
     bool showPaths = false;  // the debug view of the paths (DisplayPathFindGraph)
 
+    // ---- the view cones ---------------------------------------------------------------------
+    // the NPC whose view cone is shown (+0x120): the one the player looks at, or the last one
+    // who raised the alarm
+    DVElementActor* watched = nullptr;
+    // the NPC under a map point (DVElementActorNPC::IsFocusable), the front-most one
+    DVElementActor* NPCAt(const SBGeoPoint2D& p, float slack) const;
+    // shows / hides the cone of the NPC (DVEngine::ManageInputView)
+    void ToggleWatched(DVElementActor* npc);
+
 private:
     SBDrawManager* draw;
     std::unique_ptr<DVFrameHolder> frames;  // +0x168
@@ -86,6 +96,7 @@ private:
     std::vector<DVElementActor*> heroes;
     std::vector<DVElementActor*> npcs;      // +0xd88
     std::unique_ptr<DVHikingGuide> hiking;  // +0xe10
+    std::unique_ptr<DVShadowPolygon> shadow;  // +0x90c
     DVElementActor* selected = nullptr;
 
     int LoadMiscFromFile(SBFile& f);

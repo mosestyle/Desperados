@@ -62,6 +62,18 @@ public:
     // can a box of half size `half` slide from a to b without touching a wall?
     bool IsReachableThick(const SBGeoPoint2D& a, const SBGeoPoint2D& b, uint16_t layer, const SBGeoVector2D& half) const;
 
+    // ---- sight (the obstacles' cells: +0x188, per cell +0x18 count / +0x1c list) -------------------
+    // the obstacles of the cells under the box with all the flags of `type` (1 sight, 2 shots)
+    void GetObstacles(std::vector<DVSightObstacle*>& out, uint16_t layer, const SBGeoBoundingBox2D& box,
+                      uint32_t type) const;
+    // DVFastFindGrid::IsReachable(SBGeoPoint3D, SBGeoPoint3D, bool) (0x082b4c40): can one see from
+    // a to b (x, y on the map, z the height)? `shot`: for projectiles (obstacles of type 2)
+    bool IsReachable(const SBGeoPoint3D& a, const SBGeoPoint3D& b, bool shot) const;
+    // the same with the obstacles already picked (GetObstacles over a box holding the segment)
+    bool IsReachable(const SBGeoPoint3D& a, const SBGeoPoint3D& b, const std::vector<DVSightObstacle*>& obs) const;
+    // the active masks of `layer` over the box that cut characters (GetMasks, type 1)
+    void GetMasks(std::vector<DVMask*>& out, uint16_t layer, const SBGeoBoundingBox2D& box) const;
+
     // the walkable areas of each layer, for the path finder (DVPathFinder::mlpListMoveLayers)
     const std::vector<std::vector<DVmotionArea>>& MoveLayers() const { return moveLayers; }
     // the walkable area of `layer` under the point (nullptr if none)
@@ -81,6 +93,7 @@ private:
     std::vector<Layer> layers;                     // +0x20
     std::vector<std::vector<DVMask*>> maskCells;   // per cell (layer, y, x)
     std::vector<std::vector<DVLine*>> lineCells;   // +0x188 per cell (layer, y, x)
+    std::vector<std::vector<DVSightObstacle*>> obstacleCells;  // per cell of layer 0
     std::vector<std::vector<DVmotionArea>> moveLayers;
     std::vector<std::unique_ptr<DVLine>> ownLines;
     std::vector<DVSightObstacle*> viewAreas;       // +0x190

@@ -50,6 +50,28 @@ static const char* kFS =
     "  var_out *= constant_color;\n"
     "}\n";
 
+// the triangles' shaders (DrawTriangles)
+static const char* kTriVS =
+    "#version 300 es\n"
+    "in vec2 a;\n"
+    "in vec4 c;\n"
+    "uniform vec2 uTarget;\n"
+    "out vec4 var_c;\n"
+    "void main() {\n"
+    "  gl_Position = vec4(a / uTarget * 2.0 - 1.0, 0.0, 1.0);\n"
+    "  var_c = c;\n"
+    "}\n";
+static const char* kTriFS =
+    "#version 300 es\n"
+    "precision mediump float;\n"
+    "in vec4 var_c;\n"
+    "out vec4 var_out;\n"
+    "uniform bool uPattern;\n"
+    "void main() {\n"
+    "  if (uPattern && ((int(gl_FragCoord.x) + int(gl_FragCoord.y)) & 1) == 1) discard;\n"
+    "  var_out = var_c;\n"
+    "}\n";
+
 static GLuint compile(GLenum type, const char* src) {
     GLuint s = glCreateShader(type);
     glShaderSource(s, 1, &src, nullptr);
@@ -131,6 +153,10 @@ void SBDrawManager::CloseScreen() {
     if (vao) glDeleteVertexArrays(1, &vao);
     if (prog) glDeleteProgram(prog);
     prog = vao = vbo = 0;
+    if (triVbo) glDeleteBuffers(1, &triVbo);
+    if (triVao) glDeleteVertexArrays(1, &triVao);
+    if (triProg) glDeleteProgram(triProg);
+    triProg = triVao = triVbo = 0;
 }
 
 SBDrawManager::Surface* SBDrawManager::Get(uint32_t id) {
@@ -420,6 +446,58 @@ void SBDrawManager::Fill(uint32_t dst, const SBGeoBoundingBox2D* box, uint16_t c
     int dr[4] = {0, 0, d->w, d->h};
     if (box) boxRect(box, dr);
     BlitGL(fillId, 0, nullptr, dst, dr, 0, 0, 0, 1.0f, 1.0f);
+}
+
+void SBDrawManager::DrawTriangles(uint32_t dst, const std::vector<float>& v, bool pattern) {
+    Surface* d = Get(dst);
+    if (!d || v.size() < 18) return;
+    if (!triProg) {
+        triProg = glCreateProgram();
+        GLuint vs = compile(GL_VERTEX_SHADER, kTriVS), fs = compile(GL_FRAGMENT_SHADER, kTriFS);
+        glAttachShader(triProg, vs);
+        glAttachShader(triProg, fs);
+        glBindAttribLocation(triProg, 0, "a");
+        glBindAttribLocation(triProg, 1, "c");
+        glLinkProgram(triProg);
+        glDeleteShader(vs);
+        glDeleteShader(fs);
+        uTriTarget = glGetUniformLocation(triProg, "uTarget");
+        uTriPattern = glGetUniformLocation(triProg, "uPattern");
+        glGenVertexArrays(1, &triVao);
+        glBindVertexArray(triVao);
+        glGenBuffers(1, &triVbo);
+        glBindBuffer(GL_ARRAY_BUFFER, triVbo);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 6 * sizeof(float), nullptr);
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (const void*)(2 * sizeof(float)));
+        glBindVertexArray(0);
+    }
+    Upload(*d);
+    if (!d->fbo) {
+        glGenFramebuffers(1, &d->fbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, d->fbo);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, d->tex, 0);
+    } else {
+        glBindFramebuffer(GL_FRAMEBUFFER, d->fbo);
+    }
+    glViewport(0, 0, d->w, d->h);
+    glDisable(GL_SCISSOR_TEST);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glEnable(GL_BLEND);
+    glBlendEquation(GL_FUNC_ADD);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glUseProgram(triProg);
+    glUniform2f(uTriTarget, (float)d->w, (float)d->h);
+    glUniform1i(uTriPattern, pattern ? 1 : 0);
+    glBindVertexArray(triVao);
+    glBindBuffer(GL_ARRAY_BUFFER, triVbo);
+    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(v.size() * sizeof(float)), v.data(), GL_STREAM_DRAW);
+    glDrawArrays(GL_TRIANGLES, 0, (GLsizei)(v.size() / 6));
+    glBindVertexArray(0);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    d->gpuNewer = true;
 }
 
 unsigned SBDrawManager::ScreenTexture() const {
