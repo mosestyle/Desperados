@@ -1,6 +1,7 @@
 #include "dv/DVScript.h"
 #include "dv/DVMobile.h"
 #include "dv/DVPatch.h"
+#include "dv/DVSound.h"
 
 #include <set>
 #include <cmath>
@@ -1270,6 +1271,31 @@ int32_t IPutActorInBarrel(VMCore&, const int32_t* p) {
     a->SetInBarrel(b);
     return 1;
 }
+// the sound sources (DVScript::GetSoundSource: by number in the SND hunk)
+constexpr int32_t kSoundSource = 0x50000000;
+int32_t ISuspendAllSoundSources(VMCore&, const int32_t*) {
+    if (Eng() && Eng()->sound) Eng()->sound->Suspend(true);
+    return 1;
+}
+int32_t IResumeAllSoundSources(VMCore&, const int32_t*) {
+    if (Eng() && Eng()->sound) Eng()->sound->Suspend(false);
+    return 1;
+}
+int32_t IGetSoundSource(VMCore&, const int32_t* p) {
+    if (!Eng() || !Eng()->sound || p[0] < 0 || (size_t)p[0] >= Eng()->sound->SourceCount()) {
+        SBError(false, "DVScript.cpp", 0x1f64, "Script Error: no sound source %d", p[0]);
+        return 0;
+    }
+    return kSoundSource + p[0];
+}
+int32_t IActivateSoundSource(VMCore&, const int32_t* p) {
+    if (Eng() && Eng()->sound && p[0] >= kSoundSource) Eng()->sound->SetSourceActive((unsigned)(p[0] - kSoundSource), true);
+    return 1;
+}
+int32_t IDeactivateSoundSource(VMCore&, const int32_t* p) {
+    if (Eng() && Eng()->sound && p[0] >= kSoundSource) Eng()->sound->SetSourceActive((unsigned)(p[0] - kSoundSource), false);
+    return 1;
+}
 int32_t ISetSkipData(VMCore&, const int32_t* p) {
     Eng()->skipData = p[0];
     return 0;
@@ -1425,7 +1451,12 @@ void Install() {
     t[0x6b] = IInitGlobal;
     t[0x6c] = ISetGlobal;
     t[0x6d] = IGetGlobal;
-    for (int i = 0x6e; i <= 0x73; ++i) t[i] = INothing;   // sound sources
+    t[0x6e] = ISuspendAllSoundSources;
+    t[0x6f] = IResumeAllSoundSources;
+    t[0x70] = IGetSoundSource;
+    t[0x71] = IActivateSoundSource;
+    t[0x72] = IDeactivateSoundSource;
+    t[0x73] = IDeactivateSoundSource;  // IDestroySoundSource
     t[0x74] = ICleanFromHisBuildingBeforeTeleport;
     t[0x75] = IAddToHisNewBuildingAfterTeleport;
     t[0x76] = INothing;   // ICleanFromScriptZoneBeforeTeleport (the zones follow the actors)

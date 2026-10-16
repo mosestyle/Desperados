@@ -187,6 +187,26 @@ bool DVElementActor::Shoot(DVElement* t, const DVFirearm* w, bool special) {
             if (dm == 12345) damage = 12345;
         }
         if (damage) target->GotBullet(damage, this);
+    } else if ((t->classFlags & 0xf) == 8) {
+        // a script target (a pot, a sign...): in sight and hit, its script hears of the shot
+        // (DVElementTarget::Instruct 0x2f: IElementTargetScript::Shooted, if it listens to shots)
+        SBGeoPoint3D p = t->sprite->pos.pos3D;
+        SBGeoVector3D d(p.x - from.x, (p.y - from.y) * 1.33f, p.z - from.z);
+        float dist = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
+        canHit = !grid || grid->IsReachable(from, p, false);
+        if (canHit && e && e->night && !(kind == KIND_DOC && special)) {
+            float r = (float)(DVArtificialIntelligence::muwStandardViewPolygonRadius >> 1);
+            canHit = dist * dist <= r * r;
+        }
+        bool hit = false;
+        for (uint16_t i = 0; i < w->bullets; ++i) {
+            if (!canHit) continue;
+            int roll = desprand() % 100;
+            if ((int)GetHitProbability(dist / (float)w->range, false, special) > roll) hit = true;
+        }
+        auto* tg = dynamic_cast<DVElementTarget*>(t);
+        SBLog("%s shoots at a target: %s", KindName(), hit ? "hit" : canHit ? "missed" : "out of sight");
+        if (hit && tg && (tg->value144 & 4) && DVScript::mpInstance) DVScript::mpInstance->TargetEvent(t, "Shooted", this);
     }
     return canHit;
 }

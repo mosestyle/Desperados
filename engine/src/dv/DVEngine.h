@@ -95,6 +95,8 @@ public:
     DVElementActor* watched = nullptr;
     // the NPC under a map point (DVElementActorNPC::IsFocusable), the front-most one
     DVElementActor* NPCAt(const SBGeoPoint2D& p, float slack) const;
+    // a script target one can shoot at (a pot on a balcony) under a map point
+    DVElement* ShootableTargetAt(const SBGeoPoint2D& p, float slack) const;
     // shows / hides the cone of the NPC (DVEngine::ManageInputView)
     void ToggleWatched(DVElementActor* npc);
 
@@ -114,6 +116,7 @@ public:
     // ---- the scripts (step 4) ------------------------------------------------------------------
     DVScript* Script() const { return script.get(); }
     std::unique_ptr<DVDialogue> dialogue;           // +0x27c
+    std::unique_ptr<class DVSound> sound;           // +0xe0c
     std::unique_ptr<DVSequenceManager> sequences;   // +0x6d4
     // DVEngine::PerformExecuteCommand (0x08293770): the sequences' elements without an actor
     void PerformExecuteCommand(DVSequenceElement* e);

@@ -28,6 +28,7 @@
 #include "sb/SBDrawManager.h"
 #include "sb/SBFile.h"
 #include "sb/SBSound.h"
+#include "app/Mixer.h"
 
 static std::string findGameFolder(int argc, char** argv) {
     std::vector<std::string> tries;
@@ -148,8 +149,11 @@ int main(int argc, char** argv) {
 #ifdef __ANDROID__
     flags |= SDL_WINDOW_FULLSCREEN;
 #endif
-    SBSound::playVoice = PlayVoice;
-    SBSound::stopVoice = StopVoice;
+    // the mixer plays the voices, the effects and the music; without it, the voices alone
+    if (!MixerOpen()) {
+        SBSound::playVoice = PlayVoice;
+        SBSound::stopVoice = StopVoice;
+    }
     SDL_Window* window = SDL_CreateWindow("Desperados", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1280, 720, flags);
     if (!window) {
         SBLog("SDL_CreateWindow: %s", SDL_GetError());
@@ -210,6 +214,7 @@ int main(int argc, char** argv) {
     };
     auto loadLevel = [&](size_t i) {
         engine.reset();
+        MixerFlushCache();
         draw.CloseScreen();
         int ew, eh;
         engineScreen(ew, eh);
@@ -275,6 +280,12 @@ int main(int argc, char** argv) {
         }
         // an enemy or a civilian: with the gun up, shoot at him; else show / hide his view cone
         // (the original's "watch" tool)
+        // with the gun up, a target of the mission (the pot of mission 1)
+        if (gAimMode)
+            if (DVElement* t = engine->ShootableTargetAt(mp, slack)) {
+                engine->OrderShoot(t);
+                return;
+            }
         if (DVElementActor* n = engine->NPCAt(mp, slack)) {
             if (carrier && n->IsCarriable() && engine->OrderTakeBody(n)) return;
             if (gAimMode && !n->dead) engine->OrderShoot(n);
@@ -352,8 +363,8 @@ int main(int argc, char** argv) {
         while (SDL_PollEvent(&ev)) {
             switch (ev.type) {
             case SDL_QUIT: run = false; break;
-            case SDL_APP_WILLENTERBACKGROUND: paused = true; break;
-            case SDL_APP_DIDENTERFOREGROUND: paused = false; prev = SDL_GetPerformanceCounter(); break;
+            case SDL_APP_WILLENTERBACKGROUND: paused = true; MixerPause(true); break;
+            case SDL_APP_DIDENTERFOREGROUND: paused = false; MixerPause(false); prev = SDL_GetPerformanceCounter(); break;
             case SDL_KEYDOWN:
                 if (ev.key.keysym.sym == SDLK_AC_BACK || ev.key.keysym.sym == SDLK_ESCAPE) run = false;
                 if (ev.key.keysym.sym == SDLK_RIGHT && !levels.empty()) loadLevel((levelIndex + 1) % levels.size());
@@ -592,7 +603,9 @@ int main(int argc, char** argv) {
         SDL_GL_SwapWindow(window);
     }
     StopVoice();
+    MixerStopAll();
     engine.reset();
+    MixerClose();
     draw.CloseScreen();
     ui.Shutdown();
     overlay.Shutdown();

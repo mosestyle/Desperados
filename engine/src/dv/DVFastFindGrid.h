@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "dv/DVLine.h"
+#include "sb/SBGeoPlane.h"
 
 #include "sb/SBGeo.h"
 
@@ -110,6 +111,15 @@ public:
     };
     int LoadMaterialSectorsFromFile(SBFile& f);  // 0x082afb40
     const std::vector<Light>& Lights() const { return lights; }
+    // the ground's material under a point (the footsteps' sound): 0 if none
+    uint8_t MaterialAt(const SBGeoPoint2D& p, uint16_t layer) const;
+    struct Material {
+        SBGeoPolygon2DArray polygon;
+        SBGeoBoundingBox2D box;
+        uint8_t material = 0;
+        int32_t layer = 0;
+    };
+    std::vector<Material> materials;
     // ---- patches (PAT, DVEngine::LoadPatchFromFile 0x0826b810; +0x1e4) -----------------------
     int LoadPatchesFromFile(SBFile& f);
     class DVPatch* Patch(unsigned i) const { return i < patches.size() ? patches[i].get() : nullptr; }

@@ -2,6 +2,7 @@
 #include <cstdlib>
 #include "dv/DVMobile.h"
 #include "dv/DVPatch.h"
+#include "dv/DVSound.h"
 
 #include "dv/DVArtificialIntelligence.h"
 #include "dv/DVHikingGuide.h"
@@ -49,6 +50,7 @@ DVEngine::DVEngine(SBDrawManager* d) : draw(d) {
     shadow.reset(new DVShadowPolygon());
     sequences.reset(new DVSequenceManager());
     dialogue.reset(new DVDialogue());
+    sound.reset(new DVSound());
     script.reset(new DVScript());
     DVSector::ResetCounters();
     DVArtificialIntelligence::mCurrentOverallAlertStatus = 0;
@@ -60,6 +62,7 @@ DVEngine::~DVEngine() {
     script.reset();
     sequences.reset();
     dialogue.reset();
+    sound.reset();
     ownElements.clear();
     elements.clear();
     if (draw) {
@@ -120,6 +123,9 @@ bool DVEngine::LoadStateFromFile(const std::string& name) {
         case 0x43415254: done = LoadMobileElementsFromFile(f); break;       // CART
         case 0x50415420: done = grid->LoadPatchesFromFile(f); break;          // PAT
         case 0x4d415420: done = grid->LoadMaterialSectorsFromFile(f); break;  // MAT
+        case 0x4658424b: done = sound->LoadSoundFromFile(f, len); break;      // FXBK
+        case 0x4d534943: done = sound->LoadMusicFromFile(f); break;           // MSIC
+        case 0x534e4420: done = sound->LoadSoundSourcesFromFile(f); break;    // SND
         default: break;  // the others come with the next steps
         }
         if (done >= 0 && (uint32_t)done != len)
@@ -461,7 +467,17 @@ void DVEngine::PerformHourglass() {
         camera = CheckLocationIsValidForCamera(follow->sprite->pos.posMap);
         cameraMoved = true;
     }
-    for (DVElement* e : elements) e->Hourglass();
+    for (DVElement* e : elements) {
+        e->Hourglass();
+        // the frame's sound (DVElement::Refresh: DVChange::SetAsSound), at its feet
+        if (e->active && e->sprite) {
+            uint16_t id = e->sprite->GetCurrentSoundID();
+            if (id) sound->PlayFx(id, e->sprite->pos.posMap, grid->MaterialAt(e->sprite->pos.posMap, e->sprite->pos.layer));
+        }
+    }
+    // the sound: heard from the middle of the screen; the music's mood by the villains' alert
+    sound->Hourglass(camera + screen * (0.5f / zoom),
+                     (int)std::min<uint32_t>(2, DVArtificialIntelligence::mCurrentOverallVillainAlertStatus));
     // the patches a hero walks into (DVElementActor::CheckForLineCrossing over their sector's
     // DVLinePatch lines): on as he comes in, off when the last one has left
     for (const auto& p : grid->Patches()) {
@@ -688,6 +704,22 @@ DVElementActor* DVEngine::NPCAt(const SBGeoPoint2D& p, float slack) const {
         b.p1 = b.p1 + SBGeoVector2D(slack, slack);
         if (!b.IsInside_p(p)) continue;
         if (!best || best->sprite->displayOrder < s->displayOrder) best = n;
+    }
+    return best;
+}
+
+DVElement* DVEngine::ShootableTargetAt(const SBGeoPoint2D& p, float slack) const {
+    DVElement* best = nullptr;
+    for (DVElement* e : elements) {
+        auto* t = dynamic_cast<DVElementTarget*>(e);
+        if (!t || !t->active || !(t->value144 & 4) || !t->sprite) continue;
+        t->sprite->IsOnScreen(SBGeoBoundingBox2D(-1e6f, -1e6f, 1e6f, 1e6f), 1.0f);  // (its box now)
+        SBGeoBoundingBox2D b = t->sprite->boxOnMap;
+        if (!b.valid) continue;
+        b.p0 = b.p0 - SBGeoVector2D(slack, slack);
+        b.p1 = b.p1 + SBGeoVector2D(slack, slack);
+        if (!b.IsInside_p(p)) continue;
+        if (!best || best->sprite->displayOrder < t->sprite->displayOrder) best = t;
     }
     return best;
 }

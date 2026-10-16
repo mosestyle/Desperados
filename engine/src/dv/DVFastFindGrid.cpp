@@ -679,7 +679,9 @@ int DVFastFindGrid::LoadMaterialSectorsFromFile(SBFile& f) {
     uint16_t n = f.U16();
     int r = 6;
     for (uint16_t i = 0; i < n; ++i) {
-        f.U16();  // the sight obstacle (0xffff: the ground)
+        uint16_t ob = f.U16();  // the sight obstacle (0xffff: the ground)
+        DVSightObstacle* so = ob != 0xffff ? SightObstacle(ob) : nullptr;
+        int32_t obstacleLayer = so ? so->motionLayer : 0;
         uint16_t k = f.U16();
         r += 4;
         for (uint16_t j = 0; j < k; ++j) {
@@ -709,8 +711,20 @@ int DVFastFindGrid::LoadMaterialSectorsFromFile(SBFile& f) {
                 f.U8();
                 f.U32();
                 r += 0xe + s.LoadFromFile(f);
+                Material m;
+                m.polygon = s.polygon;
+                m.box = s.box;
+                m.material = material;
+                m.layer = obstacleLayer;
+                materials.push_back(m);
             }
         }
     }
     return r;
+}
+
+uint8_t DVFastFindGrid::MaterialAt(const SBGeoPoint2D& p, uint16_t layer) const {
+    for (const Material& m : materials)
+        if (m.layer == (int32_t)layer && m.box.IsInside_p(p) && m.polygon.IsInside_p(p)) return m.material;
+    return 0;
 }

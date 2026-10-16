@@ -16,6 +16,7 @@
 #include "dv/DVElement.h"
 #include "dv/DVEngine.h"
 #include "dv/DVScript.h"
+#include "sb/SBSound.h"
 #include "dv/DVPatch.h"
 #include "dv/DVDoor.h"
 #include "dv/DVSector.h"
@@ -59,7 +60,26 @@ static void savePPM(SBDrawManager& draw, const char* name) {
     draw.ReleaseSurfaceViewport(vp);
 }
 
+// DVSOUNDLOG: the sounds the engine would play
+static int gSndCount = 0;
+static int LogPlay(const std::string& path, float vol, float pan, bool loop) {
+    if (gSndCount++ < 400) fprintf(stderr, "sound %s vol %.2f pan %.2f%s\n", path.c_str(), vol, pan, loop ? " loop" : "");
+    return gSndCount;
+}
+static bool LogPlaying(int) { return true; }
+static void LogSet(int, float, float) {}
+static void LogMusic(const std::string& path) { fprintf(stderr, "music %s\n", path.c_str()); }
+static bool gMusicOnce = true;
+static bool LogWants() { bool w = gMusicOnce; gMusicOnce = false; return w; }
+
 int main(int argc, char** argv) {
+    if (getenv("DVSOUNDLOG")) {
+        SBSound::mixPlay = LogPlay;
+        SBSound::mixPlaying = LogPlaying;
+        SBSound::mixSet = LogSet;
+        SBSound::musicQueue = LogMusic;
+        SBSound::musicWantsNext = LogWants;
+    }
     if (argc < 4) {
         fprintf(stderr, "dvscript <game> <level> <seconds> [outprefix every-seconds]\n");
         return 1;
@@ -107,6 +127,26 @@ int main(int argc, char** argv) {
                 if (e->sprite->HasAnimation(a)) fprintf(stderr, " %x(%.0f)", a, e->sprite->GetDistanceForAnimation(a));
             fprintf(stderr, "\n");
         }
+    // DVLOS=x,y: which NPCs a hero standing at x,y could hit (sight of the gun)
+    if (const char* los = getenv("DVLOS")) {
+        float x = 0, y = 0;
+        sscanf(los, "%f,%f", &x, &y);
+        DVElementActor* h = engine.Heroes().empty() ? nullptr : engine.Heroes()[0];
+        if (h) {
+            h->Teleport(SBGeoPoint2D(x, y), 0, engine.Grid()->FindMotionArea(0, SBGeoPoint2D(x, y)));
+            SBGeoPoint3D from = h->FirearmPoint();
+            for (DVElementActor* n : engine.NPCs()) {
+                if (!n->active) continue;
+                SBGeoPoint3D a, b, c;
+                n->DetectionPoints(a, b, c);
+                float d = std::hypot(b.x - from.x, b.y - from.y);
+                if (d > 500) continue;
+                fprintf(stderr, "los #%d %s at %.0f,%.0f dist %.0f: %d %d %d\n", DVScript::Handle(n), n->KindName(), n->sprite->pos.posMap.x,
+                        n->sprite->pos.posMap.y, d, engine.Grid()->IsReachable(from, a, false), engine.Grid()->IsReachable(from, b, false),
+                        engine.Grid()->IsReachable(from, c, false));
+            }
+        }
+    }
     // DVPATCHES: the level's patches; DVAPPLY=i applies one at the start
     if (getenv("DVPATCHES"))
         for (size_t i = 0; i < engine.Grid()->Patches().size(); ++i) {
@@ -206,6 +246,13 @@ int main(int argc, char** argv) {
                 if (sscanf(one.c_str(), "%*d:mount:%d", &hh) == 1) {
                     auto* h = dynamic_cast<DVElementActor*>(DVScript::Element(hh));
                     fprintf(stderr, "t %d: mount #%d: %s\n", t, hh, engine.OrderMount(h) ? "ok" : "refused");
+                } else if (sscanf(one.c_str(), "%*d:shootat:%f,%f", &x, &y) == 2) {
+                    DVElement* tg = engine.ShootableTargetAt(SBGeoPoint2D(x, y), 6.0f);
+                    if (!tg) tg = engine.NPCAt(SBGeoPoint2D(x, y), 6.0f);
+                    fprintf(stderr, "t %d: shoot at %.0f,%.0f: %s %s\n", t, x, y, tg ? tg->KindName() : "nothing", tg && engine.OrderShoot(tg) ? "ok" : "refused");
+                } else if (one.find(":reload") != std::string::npos) {
+                    engine.OrderReload();
+                    fprintf(stderr, "t %d: reload\n", t);
                 } else if (sscanf(one.c_str(), "%*d:take:%d", &hh) == 1) {
                     auto* h = dynamic_cast<DVElementActor*>(DVScript::Element(hh));
                     fprintf(stderr, "t %d: take #%d: %s\n", t, hh, engine.OrderTakeBody(h) ? "ok" : "refused");

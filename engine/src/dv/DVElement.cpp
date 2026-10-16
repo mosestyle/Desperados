@@ -680,13 +680,22 @@ bool DVElementActor::StepOrders() {
             actionState = 0;
         }
         break;
-    case CMD_RELOAD:
-        if (first) o.tolerance = 30.0f;
-        s->PerformAction(o.id, pos.posture == POSTURE_LYING ? CMD_LYING : CMD_WAIT, 0xb, false);
-        o.tolerance -= 1.0f;
-        r = o.tolerance <= 0.0f ? 3 : 2;
+    case CMD_RELOAD: {
+        // DVElementActorPC::Translate 0x44: the reload's animation by posture (0x88 standing,
+        // 0x89 lying, 0x8a on a horse); the gun is full at its end
+        uint32_t a = pos.posture == POSTURE_LYING ? 0x89u : pos.posture == POSTURE_RIDING ? 0x8au : 0x88u;
+        if (s->HasAnimation(a)) {
+            r = s->PerformAction(o.id, a, 0, false);
+        } else {
+            if (first) o.tolerance = 30.0f;
+            s->PerformAction(o.id, pos.posture == POSTURE_LYING ? CMD_LYING : CMD_WAIT, 0xb, false);
+            o.tolerance -= 1.0f;
+            r = o.tolerance <= 0.0f ? 3 : 2;
+        }
         if (r == 3 && firearm) ammo = (int16_t)firearm->magazine;
+        if (r == 3 && pos.posture == POSTURE_RIDING) actionState = 0;
         break;
+    }
     case CMD_PUNCH: {
         // DVElementActorHuman::Execute 0xe9: the punch; at the blow's frame whoever is within 40
         // in front of him is hit (0x2d)
