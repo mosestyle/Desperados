@@ -198,6 +198,28 @@ bool DVEngine::LoadStateFromFile(const std::string& name) {
         }
     }
     for (DVElementActor* h : heroes) h->InitFirearm();
+    // DVElementActorPC::LastMinuteInitialization (0x08248350): the hero's starting action, on the
+    // nearest free horse for 0x10, lying for 7
+    for (DVElementActor* h : heroes) {
+        if (h->profile == 0x10) {
+            DVElementActor* best = nullptr;
+            float bd = 0;
+            for (DVElementActor* c : characters)
+                if (c->IsHorse() && !c->rider) {
+                    SBGeoVector2D d = c->sprite->pos.posMap - h->sprite->pos.posMap;
+                    float q = d.x * d.x + d.y * d.y;
+                    if (!best || q < bd) best = c, bd = q;
+                }
+            if (best) h->SitOnHorse(best);
+            else SBError(false, "DVElementActorPC.cpp", 0x11de, "Hero on (%u, %u) didn't find a horse !",
+                         (unsigned)h->sprite->pos.posMap.x, (unsigned)h->sprite->pos.posMap.y);
+        } else if (h->profile == 7) {
+            h->SetStates(POSTURE_LYING, 0);
+            h->defaultCommand = CMD_LYING;
+        } else if (h->profile != 0 && h->sprite->HasAnimation(h->profile)) {
+            h->defaultCommand = h->profile;
+        }
+    }
     // the mission's scripts (DVScript::Initialize): StartUp and the scripted elements
     {
         std::vector<DVElement*> all;
@@ -324,6 +346,17 @@ int DVEngine::LoadElemFromFile(SBFile& f) {
         if (onMap) elements.push_back(e);
         n += 2 + k;
     }
+    // the saddles (0x110b) go on their horse (its index among the elements on the map)
+    for (DVElement* e : std::vector<DVElement*>(elements))
+        if (e->kind == 0x110b && e->active) {
+            auto* o = static_cast<DVElementObject*>(e);
+            int16_t idx = (int16_t)o->value9a;
+            if (idx >= 0 && (size_t)idx < elements.size())
+                if (auto* h = dynamic_cast<DVElementActor*>(elements[(size_t)idx])) {
+                    h->saddle = e;
+                    h->horseUsed = true;
+                }
+        }
     return n;
 }
 
@@ -666,12 +699,54 @@ bool DVEngine::OrderMove(const SBGeoPoint2D& p, bool run) {
     return selected->MoveTo(p, run);
 }
 
+// a free horse (or the selected hero's own) under a map point
+DVElementActor* DVEngine::HorseAt(const SBGeoPoint2D& p, float slack) const {
+    DVElementActor* best = nullptr;
+    for (DVElementActor* h : characters) {
+        if (!h->IsHorse() || !h->active || h->dead) continue;
+        if (h->rider && h->rider != selected) continue;
+        SBGeoBoundingBox2D b = h->sprite->boxOnMap;
+        if (!b.valid) continue;
+        b.p0 = b.p0 - SBGeoVector2D(slack, slack);
+        b.p1 = b.p1 + SBGeoVector2D(slack, slack);
+        if (!b.IsInside_p(p)) continue;
+        if (!best || h->sprite->displayOrder > best->sprite->displayOrder) best = h;
+    }
+    return best;
+}
+
+// DVElementActorHorse::MouseClicked: the selected hero goes to the horse and gets on it
+bool DVEngine::OrderMount(DVElementActor* h) {
+    if (!selected || selected->dead || missionFailed || userLocked || missionResult || !h) return false;
+    if (selected->Horse()) return false;
+    std::deque<DVOrder> seq;
+    if (!selected->BuildMount(h, seq)) return false;
+    selected->Launch(seq, true);
+    return true;
+}
+
+bool DVEngine::OrderTakeBody(DVElementActor* b) {
+    if (!selected || selected->dead || missionFailed || userLocked || missionResult || !b) return false;
+    std::deque<DVOrder> seq;
+    if (!selected->BuildTakeBody(b, seq)) return false;
+    selected->Launch(seq, true);
+    return true;
+}
+
 void DVEngine::OrderMakeRunning() {
     if (selected) selected->MakeRunning();
 }
 
 void DVEngine::OrderCrouch() {
     if (!selected || selected->dead || missionFailed || userLocked) return;
+    if (selected->Horse()) {
+        selected->OrderDismount();
+        return;
+    }
+    if (selected->carried) {
+        selected->OrderDropBody();
+        return;
+    }
     if (selected->Posture() == POSTURE_LYING) selected->MakeWalking();
     else selected->MakeCrawling();
 }

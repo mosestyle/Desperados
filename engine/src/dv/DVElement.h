@@ -132,13 +132,23 @@ enum : uint32_t {
     CMD_SCRIPT_ANIM = 0xea,    // a script's animation, once (the sequence's 0x20)
     CMD_SCRIPT_LOOP = 0xeb,    // ... looped (0x21)
     CMD_SCRIPT_FREEZE = 0xec,  // ... stopping on its last frame (0x22)
+    CMD_MOUNT = 0xf,           // getting on a horse ("Monter à cheval")
+    CMD_RIDE_WAIT = 0x10,      // sitting on it
+    CMD_RIDE_SHOOT = 0x11,     // a shot from the saddle
+    CMD_RIDE_WALK = 0x12, CMD_RIDE_GALLOP = 0x13,
+    CMD_DISMOUNT = 0x14,
+    CMD_TAKE_BODY = 0x29,      // picking a body up
+    CMD_CARRY = 0x2a,          // walking with it
+    CMD_DROP_BODY = 0x2b,      // putting it down
+    CMD_CARRIED = 0x6c,        // the body on the shoulder
     CMD_MOVE_ANIM = 0xee,      // the engine's own: a move with o.anim (doors, lifts)
     CMD_TELEPORT = 0xef,       // the engine's own: put there (inside a house: to the next door)
     CMD_NONE = 0xbb,
 };
 
 // postures (DVposture)
-enum : uint32_t { POSTURE_STANDING = 0, POSTURE_LYING = 2, POSTURE_GETTING_UP = 10 };
+enum : uint32_t { POSTURE_STANDING = 0, POSTURE_RIDING = 1, POSTURE_LYING = 2, POSTURE_CARRIED = 6, POSTURE_GETTING_UP = 10,
+                  POSTURE_CARRYING = 0xb };
 
 class DVElementActor : public DVElement {
 public:
@@ -210,7 +220,33 @@ public:
     uint16_t lastDirection = 0;    // +0x220
     bool knockedOut = false;       // +0x12e
     int16_t life = 0x29a;          // +0x130 (DVElementActorHuman: 666; heroes 100; villains their energy)
-    DVElement* horse = nullptr;    // +0x134
+    DVElement* horse = nullptr;    // +0x134 the horse he rides
+    // ---- horses (DVElementActorHorse, Game/DVHorse.cpp) ------------------------------------------
+    DVElementActor* rider = nullptr;   // horse +0x270
+    DVElement* saddle = nullptr;       // horse +0x274 (an object of kind 0x110b)
+    bool horseUsed = false;            // horse +0x26c (someone has ridden it)
+    bool canRide = true;               // human +0x12f (DVScript::EnableHorseUseFor)
+    bool rideWalking = false;          // his walk was given to the horse
+    // ---- carrying a body (DVCooper / DVSanchez: +0x2c8, the body's carrier) ----------------------
+    DVElementActor* carried = nullptr;  // the body on his shoulder
+    DVElementActor* carrier = nullptr;  // who carries him
+    bool CanCarry() const { return kind == KIND_COOPER || kind == KIND_SANCHEZ; }
+    bool IsCarriable(bool scripted = false) const;          // out cold or dead, on the ground, not carried
+    // the orders to take a body: to it, then the pick-up (0x29)
+    bool BuildTakeBody(DVElementActor* body, std::deque<DVOrder>& out, bool scripted = false) const;
+    void OrderDropBody();              // the put-down (0x2b), now
+    bool IsHorse() const { return kind == KIND_HORSE; }
+    DVElementActor* Horse() const;     // the horse he sits on, or nullptr
+    bool Mounted() const { return Horse() && sprite->pos.posture == 1; }
+    // DVElementActorHuman::SitOnHorse (0x0821c300): on it at once
+    void SitOnHorse(DVElementActor* h);
+    // the orders of a mount: a walk beside the horse, then the mount (0xf)
+    bool BuildMount(DVElementActor* h, std::deque<DVOrder>& out) const;
+    void OrderDismount();              // the dismount (0x14), now
+    // a rider follows his horse: place, direction, the riding animation in step with the horse's
+    void RideSync();
+    void HorseHourglass();             // DVElementActorHorse::Hourglass (0x08216420), the saddle
+    void CopyPositionFrom(const DVElement* e);  // DVElement::CopyPositionMapEtc
     // a prisoner (+0x9d) and the villain who holds him at gunpoint (+0xa0)
     DVElementActor* menacer = nullptr;
     bool IsHeldPrisoner() const {

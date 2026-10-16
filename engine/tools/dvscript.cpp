@@ -80,8 +80,18 @@ int main(int argc, char** argv) {
             fprintf(stderr, "#%zu %s %s at %.0f,%.0f layer %u%s%s role %d\n", i + 1, e->KindName(), e->scriptName.c_str(),
                     e->sprite ? e->sprite->pos.posMap.x : 0.f, e->sprite ? e->sprite->pos.posMap.y : 0.f,
                     e->sprite ? e->sprite->pos.layer : 0, e->active ? "" : " (off)", a && a->InBuilding() ? " (in a house)" : "",
-                    a && a->ai ? (int)a->ai->role : -1);
+                    a && a->ai ? (int)a->ai->role : (a ? -1000 - (int)a->profile : -1));
         }
+        }
+    // DVANIMS=handle,...: the animations an element's sprite has (and their walking distance)
+    if (const char* an = getenv("DVANIMS"))
+        for (const char* q = an; q && *q; q = strchr(q, ',') ? strchr(q, ',') + 1 : nullptr) {
+            DVElement* e = DVScript::Element(atoi(q));
+            if (!e || !e->sprite) continue;
+            fprintf(stderr, "#%d %s anims:", atoi(q), e->KindName());
+            for (uint32_t a = 0; a < 0xb9; ++a)
+                if (e->sprite->HasAnimation(a)) fprintf(stderr, " %x(%.0f)", a, e->sprite->GetDistanceForAnimation(a));
+            fprintf(stderr, "\n");
         }
     // DVDOORS: the level's doors
     if (getenv("DVDOORS"))
@@ -108,6 +118,27 @@ int main(int argc, char** argv) {
                         o->planeGround.zx * m.x + o->planeGround.zy * m.y + o->planeGround.zc, o->box.p0.x, o->box.p0.y, o->box.p1.x,
                         o->box.p1.y);
             }
+        }
+    }
+    // DVPFTEST=x,y: paths from the selected hero to points around (x, y) on its area
+    if (const char* pt = getenv("DVPFTEST")) {
+        float cx = 0, cy = 0;
+        sscanf(pt, "%f,%f", &cx, &cy);
+        DVElementActor* h = engine.Selected() ? engine.Selected() : (engine.Heroes().empty() ? nullptr : engine.Heroes()[0]);
+        if (h) {
+            if (cx || cy) h->Teleport(SBGeoPoint2D(cx, cy), h->sprite->pos.layer, engine.Grid()->FindMotionArea(h->sprite->pos.layer, SBGeoPoint2D(cx, cy)));
+            int ok = 0, bad = 0, skip = 0;
+            for (int dy = -400; dy <= 400; dy += 50)
+                for (int dx = -600; dx <= 600; dx += 60) {
+                    SBGeoPoint2D g(h->sprite->pos.posMap.x + dx, h->sprite->pos.posMap.y + dy);
+                    SBGeoBoundingBox2D box = h->sprite->pos.GetMoveBoxMap() - h->sprite->pos.posMap + g;
+                    if (!engine.Grid()->FindAutorizedPosition(box, g, h->sprite->pos.layer)) { ++skip; continue; }
+                    g = SBCenter(box);
+                    if (engine.Grid()->FindMotionArea(h->sprite->pos.layer, g) != h->Area()) { ++skip; continue; }
+                    std::deque<DVOrder> q;
+                    if (h->BuildMove(g, CMD_WALK, 0, q)) ++ok; else { ++bad; fprintf(stderr, "  fail to %.0f,%.0f\n", g.x, g.y); }
+                }
+            fprintf(stderr, "pftest: %d ok, %d failed, %d skipped\n", ok, bad, skip);
         }
     }
     SBFont font;
@@ -144,7 +175,20 @@ int main(int argc, char** argv) {
                 int tick = atoi(one.c_str());
                 if (tick != t) continue;
                 float x = 0, y = 0;
-                if (one.find(":crouch") != std::string::npos) {
+                int hh = 0;
+                if (sscanf(one.c_str(), "%*d:mount:%d", &hh) == 1) {
+                    auto* h = dynamic_cast<DVElementActor*>(DVScript::Element(hh));
+                    fprintf(stderr, "t %d: mount #%d: %s\n", t, hh, engine.OrderMount(h) ? "ok" : "refused");
+                } else if (sscanf(one.c_str(), "%*d:take:%d", &hh) == 1) {
+                    auto* h = dynamic_cast<DVElementActor*>(DVScript::Element(hh));
+                    fprintf(stderr, "t %d: take #%d: %s\n", t, hh, engine.OrderTakeBody(h) ? "ok" : "refused");
+                } else if (sscanf(one.c_str(), "%*d:kill:%d", &hh) == 1) {
+                    if (auto* h = dynamic_cast<DVElementActor*>(DVScript::Element(hh))) h->GotBullet(1000, engine.Selected());
+                    fprintf(stderr, "t %d: kill #%d\n", t, hh);
+                } else if (sscanf(one.c_str(), "%*d:ko:%d", &hh) == 1) {
+                    if (auto* h = dynamic_cast<DVElementActor*>(DVScript::Element(hh))) h->KnockHit(20, engine.Selected());
+                    fprintf(stderr, "t %d: knock out #%d\n", t, hh);
+                } else if (one.find(":crouch") != std::string::npos) {
                     engine.OrderCrouch();
                     fprintf(stderr, "t %d: crouch -> posture %u\n", t, engine.Selected() ? engine.Selected()->Posture() : 0);
                 } else if (sscanf(one.c_str(), "%*d:move:%f,%f", &x, &y) == 2 || sscanf(one.c_str(), "%*d:run:%f,%f", &x, &y) == 2) {

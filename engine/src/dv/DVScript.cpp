@@ -1,5 +1,6 @@
 #include "dv/DVScript.h"
 
+#include <set>
 #include <cmath>
 #include <cstring>
 #include <algorithm>
@@ -722,6 +723,116 @@ int32_t IRecordEnterGame(VMCore&, const int32_t* p) {
     e->anim = p[3] ? 5 : 3;
     return 1;
 }
+// ---- horses ---------------------------------------------------------------------------------
+DVElementActor* HorseOf(int32_t h) {
+    auto* a = dynamic_cast<DVElementActor*>(DVScript::Element(h));
+    return a && a->IsHorse() ? a : nullptr;
+}
+// mounting or getting down (0xf, 0x14, 0x15): neither on nor off yet (DVScript::GetTheRider)
+bool Changing(const DVElementActor* a) {
+    uint32_t c = a->CurrentCommand();
+    return c < 0x16 && ((0x308000u >> c) & 1);
+}
+int32_t IGetTheRider(VMCore&, const int32_t* p) {
+    DVElementActor* h = HorseOf(p[0]);
+    if (!h) {
+        SBError(false, "DVScript.cpp", 0x154a, "Script Error: Trying to get the rider of a non horse.");
+        return 0;
+    }
+    if (!h->rider || Changing(h->rider)) return 0;
+    return DVScript::Handle(h->rider);
+}
+int32_t IGetTheHorse(VMCore&, const int32_t* p) {
+    auto* a = dynamic_cast<DVElementActor*>(DVScript::Element(p[0]));
+    if (!a || (a->classFlags & 7) != 7) {
+        SBError(false, "DVScript.cpp", 0x1566, "Script Error: Trying to get the horse of a non human.");
+        return 0;
+    }
+    if (Changing(a) || !a->Horse()) return 0;
+    return DVScript::Handle(a->Horse());
+}
+int32_t IIsHorseUsed(VMCore&, const int32_t* p) {
+    DVElementActor* h = HorseOf(p[0]);
+    if (!h) return 0;
+    return h->rider && !Changing(h->rider);
+}
+// DVScript::RecordMountHorse (0x0834ed90): to the horse, then on it (0x33)
+int32_t IRecordMountHorse(VMCore&, const int32_t* p) {
+    if (!Recording("mount")) return 0;
+    DVElement* a = DVScript::Element(p[0]);
+    DVElementActor* h = HorseOf(p[1]);
+    if (!a || (a->classFlags & 7) != 7 || !h) {
+        SBError(false, "DVScript.cpp", 0xe74, "Script Error: You tried to create a mount sequence with an illegal actor");
+        return 0;
+    }
+    h->horseUsed = true;
+    DVSequenceElement* e = Rec();
+    e->AsInteraction(e->level, 0x33, a, h, h->sprite->pos.direction);
+    return 1;
+}
+int32_t IRecordDismountHorse(VMCore&, const int32_t* p) {
+    if (!Recording("dismount")) return 0;
+    DVElement* a = DVScript::Element(p[0]);
+    DVElementActor* h = HorseOf(p[1]);
+    if (!a || (a->classFlags & 7) != 7 || !h) {
+        SBError(false, "DVScript.cpp", 0xecb, "Script Error: You tried to create a dismount sequence with an illegal actor");
+        return 0;
+    }
+    DVSequenceElement* e = Rec();
+    e->AsInteraction(e->level, 0x34, a, h, h->sprite->pos.direction);
+    return 1;
+}
+// DVScript::RecordTakeCorpse (0x0834dbf0): Cooper or Sanchez takes a body on his shoulder (0x4f)
+int32_t IRecordTakeCorpse(VMCore&, const int32_t* p) {
+    if (!Recording("take corpse")) return 0;
+    auto* a = dynamic_cast<DVElementActor*>(DVScript::Element(p[0]));
+    DVElement* b = DVScript::Element(p[1]);
+    if (!a || !a->CanCarry()) {
+        SBError(false, "DVScript.cpp", 0xd29, "Script Error: In RecordTakeCorpse, the taker is not a valid actor");
+        return 0;
+    }
+    if (!b || (b->classFlags & 3) != 3) {
+        SBError(false, "DVScript.cpp", 0xd25, "Script Error: In RecordTakeCorpse, the corpse is not valid");
+        return 0;
+    }
+    DVSequenceElement* e = Rec();
+    e->AsInteraction(e->level, 0x4f, a, b, 0);
+    return 1;
+}
+// DVScript::RecordLeaveCorpse (0x0834e0c0): he puts it down (0x50)
+int32_t IRecordLeaveCorpse(VMCore&, const int32_t* p) {
+    if (!Recording("leave corpse")) return 0;
+    auto* a = dynamic_cast<DVElementActor*>(DVScript::Element(p[0]));
+    if (!a || !a->CanCarry()) {
+        SBError(false, "DVScript.cpp", 0xd29, "Script Error: In RecordLeaveCorpse, the taker is not a valid actor");
+        return 0;
+    }
+    DVSequenceElement* e = Rec();
+    e->AsInteraction(e->level, 0x50, a, nullptr, 0);
+    return 1;
+}
+// DVScript::RecordJumpOnHorse (0x0834cec0): Cooper's jump into the saddle (here: a mount)
+int32_t IRecordJumpOnHorse(VMCore&, const int32_t* p) {
+    if (!Recording("jump")) return 0;
+    DVElement* a = DVScript::Element(p[0]);
+    DVElementActor* h = HorseOf(p[1]);
+    if (!a || !h) return 0;
+    h->horseUsed = true;
+    DVSequenceElement* e = Rec();
+    e->AsInteraction(e->level, 0x54, a, h, h->sprite->pos.direction);
+    return 1;
+}
+// DVScript::EnableHorseUseFor (0x083500c0)
+int32_t IEnableHorseUseFor(VMCore&, const int32_t* p) {
+    auto* a = dynamic_cast<DVElementActor*>(DVScript::Element(p[0]));
+    if (!a) {
+        SBError(false, "DVScript.cpp", 0x1106, "Script Error: EnableHorseUseFor, wrong parameters");
+        return 0;
+    }
+    a->canRide = p[1] != 0;
+    return 1;
+}
+
 // DVScript::SwitchProfile (0x0834a050): the actor's other costume
 int32_t ISwitchProfile(VMCore&, const int32_t* p) {
     DVElement* e = DVScript::Element(p[0]);
@@ -1005,14 +1116,20 @@ int32_t IRecordSpeakPC(VMCore&, const int32_t* p) {
 }
 // the recorded things this engine doesn't do yet (horses, corpses, barrels, mobile elements):
 // nothing is recorded, the sequence goes on
-int32_t IRecordNothing(VMCore&, const int32_t*) {
-    static bool told = false;
-    if (!told) {
-        told = true;
-        SBLog("script: a recorded action this engine doesn't do yet (horse / corpse / barrel / cart) was skipped");
-    }
+static int32_t SkipRecorded(const char* what) {
+    static std::set<std::string> told;
+    if (told.insert(what).second) SBLog("script: %s isn't done by this engine yet, skipped", what);
     return 1;
 }
+#define DV_SKIPPED(n) \
+    int32_t I##n(VMCore&, const int32_t*) { return SkipRecorded(#n); }
+DV_SKIPPED(RecordReplaceAnim)
+DV_SKIPPED(RecordRestoreAnim)
+DV_SKIPPED(RecordEnterBarrel)
+DV_SKIPPED(RecordLeaveBarrel)
+DV_SKIPPED(RecordTieCorpse)
+DV_SKIPPED(RecordStartMobileElement)
+DV_SKIPPED(RecordStopMobileElement)
 
 // ---- globals, This, the rest ----------------------------------------------------------------------
 
@@ -1200,13 +1317,13 @@ void Install() {
     t[0x3e] = IForceBattleDecision;
     t[0x3f] = IMakeNoise;
     t[0x40] = INothing;      // IFreeze
-    t[0x41] = INothing;      // IGetTheRider
-    t[0x42] = INothing;      // IGetTheHorse
+    t[0x41] = IGetTheRider;
+    t[0x42] = IGetTheHorse;
     t[0x43] = IIsAnimationActive;
     t[0x44] = ISetAnimationState;
     t[0x45] = IIsPatchApplied;
     t[0x46] = IApplyPatch;
-    t[0x47] = INothing;      // IIsHorseUsed
+    t[0x47] = IIsHorseUsed;
     t[0x48] = IStartSequenceRecording;
     t[0x49] = IEndSequenceRecording;
     t[0x4a] = IThen;         // IIncrementSequenceLevel
@@ -1227,8 +1344,8 @@ void Install() {
     t[0x59] = IRecordMove;
     t[0x5a] = IRecordLeaveGame;
     t[0x5b] = IRecordTurnTo;
-    t[0x5c] = IRecordNothing;   // IRecordMountHorse
-    t[0x5d] = IRecordNothing;   // IRecordDismountHorse
+    t[0x5c] = IRecordMountHorse;
+    t[0x5d] = IRecordDismountHorse;
     t[0x5e] = IRecordFireAt;
     t[0x5f] = IRecordPlayAnim;
     t[0x60] = IRecordPlayAnimLoop;
@@ -1261,29 +1378,29 @@ void Install() {
     t[0x80] = IGetCurrentAction;
     t[0x81] = IIsActorCart;
     t[0x82] = ISetPathWalkingStyle;
-    t[0x83] = IRecordNothing;   // IRecordReplaceAnim
-    t[0x84] = IRecordNothing;   // IRecordRestoreAnim
+    t[0x83] = IRecordReplaceAnim;
+    t[0x84] = IRecordRestoreAnim;
     t[0x85] = ISees;
     t[0x86] = IGetActorIndex;
     for (int i = 0x87; i <= 0x96; ++i) t[i] = INothing;   // armies, snake, watch
-    t[0x97] = IRecordNothing;   // IRecordTakeCorpse
+    t[0x97] = IRecordTakeCorpse;
     t[0x98] = IRecordMoveIntoBuilding;
     t[0x99] = IRecordCameraMoveTo;
-    t[0x9a] = IRecordNothing;   // IRecordEnterBarrel
-    t[0x9b] = IRecordNothing;   // IRecordLeaveBarrel
+    t[0x9a] = IRecordEnterBarrel;
+    t[0x9b] = IRecordLeaveBarrel;
     t[0x9c] = IRecordEnterGame;
-    t[0x9d] = IRecordNothing;   // IRecordLeaveCorpse
+    t[0x9d] = IRecordLeaveCorpse;
     t[0x9e] = INothing;
     t[0x9f] = INothing;         // ICallKnife
     t[0xa0] = IResetAnim;
-    t[0xa1] = IRecordNothing;   // IRecordJumpOnHorse
-    t[0xa2] = INothing;
+    t[0xa1] = IRecordJumpOnHorse;
+    t[0xa2] = IEnableHorseUseFor;
     t[0xa3] = INothing;
-    t[0xa4] = IRecordNothing;   // IRecordTieCorpse
+    t[0xa4] = IRecordTieCorpse;
     t[0xa5] = INothing;
     t[0xa6] = ISetBuildingActive;
-    t[0xa7] = IRecordNothing;   // IRecordStartMobileElement
-    t[0xa8] = IRecordNothing;   // IRecordStopMobileElement
+    t[0xa7] = IRecordStartMobileElement;
+    t[0xa8] = IRecordStopMobileElement;
     t[0xa9] = ISetNearestDoorDocLockPickable;
     t[0xaa] = IDisplayHint;
     t[0xab] = IHideHint;

@@ -830,7 +830,7 @@ void DVArtificialMalignity::InitOneAI() {
     bool init = npc->InitState(*this);
     DVPositionInterface& pos = npc->sprite->pos;
     DVFastFindGrid* grid = DVFastFindGrid::mpFastFindGrid;
-    if (grid) {
+    if (grid && !npc->Mounted() && !npc->InBuilding()) {
         SBGeoBoundingBox2D box = pos.GetMoveBox(pos.posture) + pos.posMap;
         if (!grid->FindAutorizedPosition(box, pos.posMap, pos.layer)) {
             SBError(false, "DVArtificialMalignity.cpp", 0x38fc,

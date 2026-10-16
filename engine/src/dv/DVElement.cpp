@@ -397,11 +397,16 @@ void DVElementActor::Stop() {
     if (scriptElement) EndScriptElement(false);
     orders.clear();
     newOrder = true;
-    defaultCommand = CMD_NONE;
+    defaultCommand = Mounted() ? (uint32_t)CMD_RIDE_WAIT : (uint32_t)CMD_NONE;
+    if (DVElementActor* h = Horse()) h->Stop();
 }
 
 // DVElementActor::MakeRunning (0x08214dd0): the move goes on running (standing up first)
 void DVElementActor::MakeRunning() {
+    if (DVElementActor* h = Horse()) {
+        h->MakeRunning();
+        return;
+    }
     if (orders.empty()) return;
     bool lying = sprite->pos.posture == POSTURE_LYING;
     for (DVOrder& o : orders) {
@@ -455,9 +460,12 @@ void DVElementActor::MakeWalking() {
 // DVElementActorHuman 0x0821e420, DVElementActor 0x0820da70) for the commands of this step
 void DVElementActor::Hourglass() {
     if (selectionPulse > 0) --selectionPulse;
+    // on someone's shoulder: he moves it (StepOrders of the carrier)
+    if (carrier) return;
     if (!active) {
         // in a house he is off the map, but goes on with his orders (out through a door)
-        if (InBuilding() && !orders.empty()) StepOrders();
+        // (and one taken off the map still finishes what a script told him)
+        if ((InBuilding() || scriptElement) && !orders.empty()) StepOrders();
         return;
     }
     // DVElementActorHuman::Hourglass: out cold he lies; the concussion wears off
@@ -468,7 +476,11 @@ void DVElementActor::Hourglass() {
         NPCHourglass();
         return;
     }
-    // the animals and horses only move for the scripts here
+    if (IsHorse()) {
+        HorseHourglass();
+        return;
+    }
+    // the animals only move for the scripts here
     if (!IsHero() && orders.empty() && !scriptElement) return;
     StepOrders();
 }
@@ -477,6 +489,66 @@ void DVElementActor::Hourglass() {
 bool DVElementActor::StepOrders() {
     DVSprite* s = sprite.get();
     DVPositionInterface& pos = s->pos;
+    if (carried && carried->carrier == this) {
+        // the body follows him (DVElement::CopyPositionMapEtc), drawn on his shoulder
+        carried->CopyPositionFrom(this);
+        if (carried->sprite->HasAnimation(CMD_CARRIED)) {
+            carried->sprite->row = (uint16_t)(carried->sprite->animRows[CMD_CARRIED] + carried->sprite->pos.direction);
+            carried->sprite->entry = 0;
+        }
+        carried->sprite->displayOrder = s->displayOrder + 0.5f;
+        if (orders.empty()) {
+            // standing still with it: the carrying walk's first frame
+            if (s->HasAnimation(CMD_CARRY)) {
+                s->row = (uint16_t)(s->animRows[CMD_CARRY] + pos.direction);
+                s->entry = 0;
+                s->orderId = 0xffffffff;
+            }
+            s->displayOrder = pos.pos3D.y;
+            carried->sprite->displayOrder = s->displayOrder + 0.5f;
+            return false;
+        }
+    }
+    // on a horse: the walks are the horse's (its own orders); he follows it
+    if (DVElementActor* h = Horse(); h && pos.posture == POSTURE_RIDING &&
+                                     (orders.empty() || orders.front().command != CMD_MOUNT)) {
+        auto isMove = [](uint32_t c) {
+            return c == CMD_WALK || c == CMD_RUN || c == CMD_CRAWL || c == CMD_MOVE_ANIM || c == CMD_TURN || c == CMD_TELEPORT;
+        };
+        if (!orders.empty() && isMove(orders.front().command)) {
+            std::deque<DVOrder> hs;
+            while (!orders.empty() && isMove(orders.front().command)) {
+                DVOrder o = orders.front();
+                orders.pop_front();
+                if (o.command == CMD_CRAWL) o.command = CMD_WALK;
+                hs.push_back(o);
+            }
+            if (h->scriptElement) h->EndScriptElement(false);
+            h->orders = hs;
+            h->newOrder = true;
+            h->isMove = true;
+            if (orders.empty() && scriptElement) {
+                // the script waits for the horse
+                h->scriptElement = scriptElement;
+                scriptElement = nullptr;
+            }
+            newOrder = true;
+            rideWalking = true;
+        }
+        if (!h->orders.empty()) {
+            // he waits for the horse to get there
+            RideSync();
+            return false;
+        }
+        if (orders.empty()) {
+            RideSync();
+            // the horse is there: his walk is over (for his brain)
+            bool ended = rideWalking;
+            rideWalking = false;
+            return ended;
+        }
+        CopyPositionFrom(h);
+    }
     if (orders.empty()) {
         if (defaultCommand == CMD_NONE) SetDefaultWaitAction();
         if (defaultCommand == CMD_LYING) {
@@ -513,11 +585,24 @@ bool DVElementActor::StepOrders() {
     switch (o.command) {
     case CMD_WALK:
         pos.Turn();
+        if (carried && s->HasAnimation(CMD_CARRY)) {
+            // DVCooper::Execute 0x2a: the walk with the body on his shoulder
+            r = s->PerformMotion(o.id, o.goal, o.tolerance, CMD_CARRY, 1, 0, false);
+            SetStates(POSTURE_CARRYING, r == 3 ? 0 : 1);
+            break;
+        }
         r = s->PerformMotion(o.id, o.goal, o.tolerance, CMD_WALK, 1, 0, false);
         if (r == 1) SetStates(POSTURE_STANDING, 1);
         else if (r == 3) SetStates(POSTURE_STANDING, 0);
         break;
     case CMD_RUN:
+        if (carried) {
+            // no running with a body
+            o.command = CMD_WALK;
+            newOrder = first;
+            r = 2;
+            break;
+        }
         pos.Turn();
         r = s->PerformMotion(o.id, o.goal, o.tolerance, CMD_RUN, 2, 0, false);
         if (r == 1) SetStates(POSTURE_STANDING, 1);
@@ -558,14 +643,17 @@ bool DVElementActor::StepOrders() {
                 r = 3;
                 break;
             }
-            SetStates(pos.posture == POSTURE_LYING ? POSTURE_LYING : POSTURE_STANDING, 0);
+            if (pos.posture != POSTURE_RIDING) SetStates(pos.posture == POSTURE_LYING ? POSTURE_LYING : POSTURE_STANDING, 0);
         }
         if (o.target && o.target->sprite) o.aim = o.target->sprite->pos.pos3D;
         SBGeoVector2D d(o.aim.x - pos.pos3D.x, o.aim.y - pos.pos3D.y);
         if (d.x != 0.0f || d.y != 0.0f) pos.directionWanted = (uint16_t)(SBGetSector0to15(d, 1.0f) & 0xf);
         pos.TurnFast();
-        r = s->PerformAction(o.id, o.command, 0, false);
-        if (r == 3) {
+        r = s->PerformAction(o.id, pos.posture == POSTURE_RIDING && s->HasAnimation(CMD_RIDE_SHOOT) ? (uint32_t)CMD_RIDE_SHOOT : o.command,
+                             0, false);
+        if (r == 3 && pos.posture == POSTURE_RIDING) {
+            actionState = 0;
+        } else if (r == 3) {
             SetStates(pos.posture == POSTURE_LYING ? POSTURE_LYING : POSTURE_STANDING, 4);
         } else if (r == 0 && firearm) {
             if (o.target) Shoot(o.target, firearm, false);
@@ -671,6 +759,90 @@ bool DVElementActor::StepOrders() {
         if (r == 3 && o.door) PassDoor(o.door, o.enter);
         break;
     }
+    case CMD_MOUNT: {
+        // DVElementActorHuman::Execute 0xf: on the horse at once, then the animation
+        auto* h = dynamic_cast<DVElementActor*>(o.target);
+        if (first) {
+            if (!h || !canRide || (h->rider && h->rider != this) || h->dead) {
+                r = 4;
+                break;
+            }
+            h->Stop();
+            SitOnHorse(h);
+        }
+        r = s->HasAnimation(CMD_MOUNT) ? s->PerformAction(o.id, CMD_MOUNT, 0, false) : 3;
+        if (h) CopyPositionFrom(h);
+        break;
+    }
+    case CMD_DISMOUNT: {
+        // DVElementActorHuman::Execute 0x14: down, beside the horse
+        DVElementActor* h = Horse();
+        if (!h) {
+            r = 3;
+            break;
+        }
+        if (first) h->Stop();
+        CopyPositionFrom(h);
+        r = s->HasAnimation(CMD_DISMOUNT) ? s->PerformAction(o.id, CMD_DISMOUNT, 0, false) : 3;
+        if (r == 3 || r == 4) {
+            SBGeoVector2D side = SBSetSector0to15((unsigned)(pos.direction + 12) & 0xf, 1.0f);
+            SBGeoPoint2D at = pos.posMap + SBGeoVector2D(side.x * 28.0f, side.y * 16.0f);
+            SBGeoBoundingBox2D box = pos.GetMoveBox(POSTURE_STANDING) + at;
+            if (s->grid && s->grid->FindAutorizedPosition(box, at, pos.layer)) at = SBCenter(box);
+            h->rider = nullptr;
+            h->horseUsed = true;
+            horse = nullptr;
+            SetStates(POSTURE_STANDING, 0);
+            Teleport(at, pos.layer, pos.sector);
+            r = 3;
+        }
+        break;
+    }
+    case CMD_TAKE_BODY: {
+        // DVCooper::Execute 0x29: the pick-up; at its end the body is on his shoulder (it
+        // follows him, 0x6c, posture 6)
+        auto* b = dynamic_cast<DVElementActor*>(o.target);
+        if (first) {
+            if (!b || !b->IsCarriable(o.anim == 1) || carried || !CanCarry()) {
+                r = 4;
+                break;
+            }
+            SBGeoVector2D d = b->sprite->pos.posMap - pos.posMap;
+            if (d.x != 0.0f || d.y != 0.0f) pos.direction = pos.directionWanted = (uint16_t)(SBGetSector0to15(d, 0.57357645f) & 0xf);
+        }
+        r = s->HasAnimation(CMD_TAKE_BODY) ? s->PerformAction(o.id, CMD_TAKE_BODY, 0, false) : 3;
+        if (r == 3 && b && b->IsCarriable(o.anim == 1)) {
+            b->active = true;
+            carried = b;
+            b->carrier = this;
+            if (b->scriptElement) b->EndScriptElement(false);
+            b->orders.clear();
+            b->SetStates(POSTURE_CARRIED, 0);
+            b->defaultCommand = CMD_CARRIED;
+            b->CopyPositionFrom(this);
+            SetStates(POSTURE_CARRYING, 0);
+        }
+        break;
+    }
+    case CMD_DROP_BODY: {
+        // DVCooper::Execute 0x2b: down in front of him, lying as he was (out cold or dead)
+        DVElementActor* b = carried;
+        r = s->HasAnimation(CMD_DROP_BODY) ? s->PerformAction(o.id, CMD_DROP_BODY, 0, false) : 3;
+        if ((r == 3 || r == 4) && b) {
+            SBGeoVector2D f = SBSetSector0to15(pos.direction & 0xf, 1.0f);
+            SBGeoPoint2D at = pos.posMap + SBGeoVector2D(f.x * 22.0f, f.y * 13.0f);
+            carried = nullptr;
+            b->carrier = nullptr;
+            b->Teleport(at, pos.layer, pos.sector);
+            b->sprite->pos.direction = pos.direction;
+            b->SetStates(b->dead ? 0xeu : (uint32_t)POSTURE_LYING, 0);
+            b->defaultCommand = b->dead ? CMD_DEAD : CMD_DEAD_KNOCKED;
+            b->sprite->displayOrder = b->sprite->pos.pos3D.y;
+            SetStates(POSTURE_STANDING, 0);
+            r = 3;
+        }
+        break;
+    }
     case CMD_TELEPORT:
         // inside a house: to the door he goes out by
         pos.SetPositionMap(o.goal);
@@ -680,6 +852,10 @@ bool DVElementActor::StepOrders() {
     case CMD_LEAVE:
         // the end of DVScript::RecordLeaveGame's walk: off the map
         active = false;
+        if (DVElementActor* h = Horse()) {
+            h->active = false;
+            if (h->saddle) h->saddle->active = false;
+        }
         r = 3;
         break;
     case CMD_TURN:
@@ -720,6 +896,7 @@ bool DVElementActor::StepOrders() {
             if (done == CMD_DIE) defaultCommand = CMD_DEAD;
             else if (done == CMD_KNOCKED && knockedOut) defaultCommand = CMD_DEAD_KNOCKED;
             else if (done == CMD_SHOOT || done == CMD_SHOOT_LYING) defaultCommand = done;
+            else if (done == CMD_MOUNT || Mounted()) defaultCommand = CMD_RIDE_WAIT;
             else if (done == CMD_SCRIPT_FREEZE || done == CMD_SCRIPT_LOOP) {
                 defaultCommand = done;
                 defaultAnim = doneAnim;
@@ -1420,6 +1597,24 @@ bool DVElementActor::InitState(DVArtificialIntelligence& a) {
         int r = (std::rand() & 0x7fff) % 0x46 + 0x1e;
         LaunchTimer(r ? (uint32_t)r : 1u, false);
     };
+    if (a.role == 0x10) {
+        // DVArtificialIntelligence::InitState: on the nearest free horse
+        DVElementActor* best = nullptr;
+        float bd = 0;
+        if (DVEngine::mpEngine)
+            for (DVElementActor* c : DVEngine::mpEngine->Characters())
+                if (c->IsHorse() && !c->rider) {
+                    SBGeoVector2D d = c->sprite->pos.posMap - sprite->pos.posMap;
+                    float q = d.x * d.x + d.y * d.y;
+                    if (!best || q < bd) best = c, bd = q;
+                }
+        if (best) SitOnHorse(best);
+        else SBError(false, "DVArtificialIntelligence.cpp", 0x12f6, "Villain on (%u, %u) didn't find a horse !",
+                     (unsigned)sprite->pos.posMap.x, (unsigned)sprite->pos.posMap.y);
+        a.SetState(AI_NORMAL, SUB_AT_POST);
+        SetViewCone(0);
+        return true;
+    }
     switch (a.role) {
     case 0:
         a.SetState(AI_NORMAL, SUB_AT_POST);

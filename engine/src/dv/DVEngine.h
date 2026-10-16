@@ -78,6 +78,11 @@ public:
     // orders for the selected hero (left click / double click on the ground)
     bool OrderMove(const SBGeoPoint2D& p, bool run);
     void OrderMakeRunning();
+    // horses: the free horse under a map point, the selected hero gets on it
+    DVElementActor* HorseAt(const SBGeoPoint2D& p, float slack) const;
+    bool OrderMount(DVElementActor* horse);
+    // Cooper / Sanchez: to a body (out cold or dead) and on the shoulder
+    bool OrderTakeBody(DVElementActor* body);
     // lie down / stand up
     void OrderCrouch();
     void OrderStop();

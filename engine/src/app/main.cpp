@@ -109,7 +109,10 @@ static std::vector<UIButton> layoutButtons(DVEngine* engine, int sw, int sh) {
     }
     if (engine->Selected()) {
         bool lying = engine->Selected()->Posture() == POSTURE_LYING;
-        b.push_back({sw - bw - gap, sh * 0.5f - bh * 0.5f, bw, bh, 100, lying ? "STAND UP" : "GET DOWN", lying});
+        bool riding = engine->Selected()->Horse() != nullptr;
+        bool carrying = engine->Selected()->carried != nullptr;
+        b.push_back({sw - bw - gap, sh * 0.5f - bh * 0.5f, bw, bh, 100,
+                     carrying ? "DROP BODY" : riding ? "GET OFF" : lying ? "STAND UP" : "GET DOWN", lying || riding || carrying});
         DVElementActor* h = engine->Selected();
         if (h->firearm) {
             std::string g = "GUN " + std::to_string(std::max<int>(0, h->ammo)) + "/" + std::to_string(h->firearm->magazine);
@@ -260,7 +263,11 @@ int main(int argc, char** argv) {
         }
         if (engine->briefing) return;
         float slack = 6.0f;
+        DVElementActor* sel = engine->Selected();
+        bool carrier = sel && sel->CanCarry() && !sel->carried && !sel->Horse() && !gAimMode;
         if (DVElementActor* h = engine->HeroAt(mp, slack)) {
+            // a hero out cold: Cooper or Sanchez picks him up
+            if (carrier && h != sel && h->IsCarriable() && engine->OrderTakeBody(h)) return;
             if (h != engine->Selected()) {
                 engine->Select(h);
                 return;
@@ -269,10 +276,17 @@ int main(int argc, char** argv) {
         // an enemy or a civilian: with the gun up, shoot at him; else show / hide his view cone
         // (the original's "watch" tool)
         if (DVElementActor* n = engine->NPCAt(mp, slack)) {
+            if (carrier && n->IsCarriable() && engine->OrderTakeBody(n)) return;
             if (gAimMode && !n->dead) engine->OrderShoot(n);
             else engine->ToggleWatched(n);
             return;
         }
+        // a horse: get on it
+        if (engine->Selected() && !engine->Selected()->Horse())
+            if (DVElementActor* h = engine->HorseAt(mp, 2.0f)) {
+                engine->OrderMount(h);
+                return;
+            }
         Uint32 now = SDL_GetTicks();
         bool twice = now - lastGroundTap < 400 && std::hypot(sx - lastTapX, sy - lastTapY) < sh * 0.06f;
         if (twice && engine->Selected() && engine->Selected()->IsInMotion()) {

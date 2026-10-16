@@ -105,6 +105,29 @@ void DVElementActor::Instruct(DVSequenceElement* e) {
         if (o.direction != pos.direction) seq.push_back(o);
         break;
     }
+    case 0x33:  // DVScript::RecordMountHorse: to the horse, on it
+    case 0x54:  // RecordJumpOnHorse
+        if (!BuildMount(dynamic_cast<DVElementActor*>(e->target), seq)) SBLog("%s can't get on that horse", KindName());
+        break;
+    case 0x34:  // RecordDismountHorse
+        if (Horse()) {
+            DVOrder o;
+            o.id = DVOrder::NewID();
+            o.command = CMD_DISMOUNT;
+            seq.push_back(o);
+        }
+        break;
+    case 0x4f:  // DVScript::RecordTakeCorpse: to the body, on the shoulder
+        if (!BuildTakeBody(dynamic_cast<DVElementActor*>(e->target), seq, true)) SBLog("%s can't take that body", KindName());
+        break;
+    case 0x50:  // RecordLeaveCorpse
+        if (carried) {
+            DVOrder o;
+            o.id = DVOrder::NewID();
+            o.command = CMD_DROP_BODY;
+            seq.push_back(o);
+        }
+        break;
     case 0x20:  // DVScript::RecordPlayAnim
         anim(CMD_SCRIPT_ANIM, (uint32_t)e->param);
         break;
@@ -154,7 +177,7 @@ void DVElementActor::Instruct(DVSequenceElement* e) {
     newOrder = true;
     isMove = false;
     (void)move;
-    defaultCommand = IsNPC() ? CMD_WAIT : CMD_NONE;
+    defaultCommand = Mounted() ? (uint32_t)CMD_RIDE_WAIT : IsNPC() ? (uint32_t)CMD_WAIT : (uint32_t)CMD_NONE;
     scriptElement = e;
     e->state = SEQ_RUNNING;
 }
