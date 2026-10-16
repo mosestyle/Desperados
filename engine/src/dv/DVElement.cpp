@@ -153,7 +153,7 @@ int DVElementActor::LoadStateFromFile(SBFile& f) {
 // DVElementActorNPC::Refresh (0x0822cae0), the drawing part; for the heroes, the selection
 // outline of DVElementActorPC::ShowSelection (0x0823fc50) over it
 void DVElementActor::Refresh(uint32_t screen, float zoom, const SBGeoBoundingBox2D& view, bool silhouettes) {
-    if (!active) return;
+    if (!active || barrel) return;
     DrawSprite(screen, zoom, view, true, silhouettes, true);
     if (!IsHero() || !selected || surface2 == 0xffffffff) return;
     DVSprite* s = sprite.get();
@@ -806,6 +806,55 @@ bool DVElementActor::StepOrders() {
         pos.ComputePositionAll();
         if (r == 3 || r == 4) {
             SitOnHorse(h);
+            r = 3;
+        }
+        break;
+    }
+    case CMD_ENTER_BARREL: {
+        // DVKung::Execute 0xee: the hop into the barrel (animation 0x63) onto its place
+        DVElement* b = o.target;
+        if (!b || !b->sprite) {
+            r = 4;
+            break;
+        }
+        if (first) {
+            SBGeoVector2D d = b->sprite->pos.posMap - pos.posMap;
+            if (d.x != 0.0f || d.y != 0.0f) pos.direction = pos.directionWanted = (uint16_t)(SBGetSector0to15(d, 1.0f) & 0xf);
+        }
+        if (s->HasAnimation(0x63) && s->GetDistanceForAnimation(0x63) > 0.0f)
+            r = s->PerformMotion(o.id, b->sprite->pos.posMap, 0.0f, 0x63, 5, 0, false);
+        else
+            r = 3;
+        if (r == 3 || r == 4) {
+            SetInBarrel(b);
+            r = 3;
+        }
+        break;
+    }
+    case CMD_LEAVE_BARREL: {
+        // DVKung::Execute 100: out of the barrel, a step in front of it (animation 0x64)
+        if (first) {
+            DVElement* b = barrel;
+            barrel = nullptr;
+            SetStates(POSTURE_STANDING, 0);
+            float dist = s->HasAnimation(0x64) ? s->GetDistanceForAnimation(0x64) : 20.0f;
+            if (dist <= 0.0f) dist = 20.0f;
+            SBGeoVector2D f = SBSetSector0to15(pos.direction & 0xf, 1.0f);
+            SBGeoPoint2D at = (b ? b->sprite->pos.posMap : pos.posMap) + SBGeoVector2D(f.x * dist, f.y * dist * 0.57357645f);
+            SBGeoBoundingBox2D box = pos.GetMoveBox(POSTURE_STANDING) + at;
+            if (s->grid && s->grid->FindAutorizedPosition(box, at, pos.layer)) at = SBCenter(box);
+            o.goal = at;
+            defaultCommand = CMD_WAIT;
+        }
+        if (s->HasAnimation(0x64) && s->GetDistanceForAnimation(0x64) > 0.0f)
+            r = s->PerformMotion(o.id, o.goal, 0.0f, 0x64, 5, 0, false);
+        else {
+            pos.SetPositionMap(o.goal);
+            pos.ComputePositionAll();
+            r = 3;
+        }
+        if (r == 3 || r == 4) {
+            SetStates(POSTURE_STANDING, 0);
             r = 3;
         }
         break;

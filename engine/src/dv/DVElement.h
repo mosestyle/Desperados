@@ -138,7 +138,9 @@ enum : uint32_t {
     CMD_RIDE_SHOOT = 0x11,     // a shot from the saddle
     CMD_RIDE_WALK = 0x12, CMD_RIDE_GALLOP = 0x13,
     CMD_DISMOUNT = 0x14,
-    CMD_JUMP_HORSE = 0x77,     // Cooper's leap into the saddle (from a balcony, a roof)
+    CMD_JUMP_HORSE = 0x77,
+    CMD_ENTER_BARREL = 0x91,   // Mia into her barrel (DVKung 0xee, animation 0x63)
+    CMD_LEAVE_BARREL = 0x92,   // ... out of it (DVKung 100, animation 0x64)     // Cooper's leap into the saddle (from a balcony, a roof)
     CMD_TAKE_BODY = 0x29,      // picking a body up
     CMD_CARRY = 0x2a,          // walking with it
     CMD_DROP_BODY = 0x2b,      // putting it down
@@ -231,6 +233,9 @@ public:
     bool rideWalking = false;          // his walk was given to the horse
     // ---- carrying a body (DVCooper / DVSanchez: +0x2c8, the body's carrier) ----------------------
     DVElementActor* carried = nullptr;  // the body on his shoulder
+    // ---- Mia's barrel (DVKung +0x2d4) -------------------------------------------------------------
+    DVElement* barrel = nullptr;
+    void SetInBarrel(DVElement* b);    // DVKung::SetInBarrel (0x082ef4d0)
     DVElementActor* carrier = nullptr;  // who carries him
     bool CanCarry() const { return kind == KIND_COOPER || kind == KIND_SANCHEZ; }
     bool IsCarriable(bool scripted = false) const;          // out cold or dead, on the ground, not carried

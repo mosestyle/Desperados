@@ -183,3 +183,20 @@ void DVElementActor::OrderDropBody() {
     orders.push_back(o);
     newOrder = true;
 }
+
+// ---- Mia's barrel ------------------------------------------------------------------------------
+
+// DVKung::SetInBarrel: in it (posture 3: no one sees her), where it stands
+void DVElementActor::SetInBarrel(DVElement* b) {
+    if (!b || !b->sprite) return;
+    barrel = b;
+    SetStates(3, 0);
+    DVPositionInterface& pos = sprite->pos;
+    pos.SetPositionMap(b->sprite->pos.posMap);
+    pos.ComputePositionAll();
+    sprite->ComputeDisplayOrder(b, false);
+    defaultCommand = 0x63;
+    if (sprite->HasAnimation(0x63)) sprite->row = (uint16_t)sprite->animRows[0x63];
+    sprite->entry = 0;
+    sprite->animation = 0x63;
+}

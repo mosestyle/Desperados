@@ -125,6 +125,33 @@ void DVElementActor::Instruct(DVSequenceElement* e) {
             seq.push_back(o);
         }
         break;
+    case 0x91: {  // DVScript::RecordEnterBarrel: Mia to the barrel, and into it
+        DVElement* b = e->target;
+        if (!b || !b->sprite || barrel) break;
+        SBGeoPoint2D at = b->sprite->pos.posMap;
+        SBGeoVector2D d = at - pos.posMap;
+        float len = std::sqrt(d.x * d.x + d.y * d.y);
+        if (len > 24.0f) {
+            SBGeoPoint2D near = at - d * (20.0f / len);
+            SBGeoBoundingBox2D box = pos.GetMoveBox(POSTURE_STANDING) + near;
+            if (sprite->grid && sprite->grid->FindAutorizedPosition(box, near, pos.layer)) near = SBCenter(box);
+            BuildMove(near, CMD_WALK, POSTURE_STANDING, seq, dynamic_cast<DVSectorMotionArea*>(b->sprite->pos.sector));
+        }
+        DVOrder o;
+        o.id = DVOrder::NewID();
+        o.command = CMD_ENTER_BARREL;
+        o.target = b;
+        seq.push_back(o);
+        break;
+    }
+    case 0x92:  // RecordLeaveBarrel
+        if (barrel) {
+            DVOrder o;
+            o.id = DVOrder::NewID();
+            o.command = CMD_LEAVE_BARREL;
+            seq.push_back(o);
+        }
+        break;
     case 0x4f:  // DVScript::RecordTakeCorpse: to the body, on the shoulder
         if (!BuildTakeBody(dynamic_cast<DVElementActor*>(e->target), seq, true)) SBLog("%s can't take that body", KindName());
         break;

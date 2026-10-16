@@ -1140,8 +1140,35 @@ static int32_t SkipRecorded(const char* what) {
     int32_t I##n(VMCore&, const int32_t*) { return SkipRecorded(#n); }
 DV_SKIPPED(RecordReplaceAnim)
 DV_SKIPPED(RecordRestoreAnim)
-DV_SKIPPED(RecordEnterBarrel)
-DV_SKIPPED(RecordLeaveBarrel)
+// DVScript::RecordEnterBarrel / RecordLeaveBarrel / PutActorInBarrel (0x0834e1a0 / 0x0834eb50 /
+// 0x0834e640): Mia and her barrel (an object)
+int32_t IRecordEnterBarrel(VMCore&, const int32_t* p) {
+    if (!Recording("enter barrel")) return 0;
+    DVElement* a = DVScript::Element(p[0]);
+    DVElement* b = DVScript::Element(p[1]);
+    if (!a || a->kind != KIND_MIA) {
+        SBError(false, "DVScript.cpp", 0xd65, "Script Error: In RecordEnterBarrel, where is Mia ?");
+        return 0;
+    }
+    if (!b || (b->classFlags & 3) != 1) {
+        SBError(false, "DVScript.cpp", 0xd61, "Script Error: In RecordEnterBarrel, the barrel is not valid");
+        return 0;
+    }
+    DVSequenceElement* e = Rec();
+    e->AsInteraction(e->level, 0x91, a, b, 0);
+    return 1;
+}
+int32_t IRecordLeaveBarrel(VMCore&, const int32_t* p) {
+    if (!Recording("leave barrel")) return 0;
+    DVElement* a = DVScript::Element(p[0]);
+    if (!a || a->kind != KIND_MIA) {
+        SBError(false, "DVScript.cpp", 0xd9a, "Script Error: In RecordLeaveBarrel, where is Mia ?");
+        return 0;
+    }
+    DVSequenceElement* e = Rec();
+    e->AsInteraction(e->level, 0x92, a, nullptr, 0);
+    return 1;
+}
 DV_SKIPPED(RecordTieCorpse)
 // DVScript::RecordStartMobileElement / RecordStopMobileElement (0x083573a0 / 0x08357440): the
 // mobile element's number (in the CART hunk)
@@ -1230,8 +1257,17 @@ int32_t IHideHint(VMCore&, const int32_t*) {
     return 0;
 }
 int32_t IPutActorInBarrel(VMCore&, const int32_t* p) {
-    DVElement* e = DVScript::Element(p[0]);
-    if (e) e->active = false;
+    auto* a = dynamic_cast<DVElementActor*>(DVScript::Element(p[0]));
+    DVElement* b = DVScript::Element(p[1]);
+    if (!a || a->kind != KIND_MIA) {
+        SBError(false, "DVScript.cpp", 0xdf1, "Script Error: In PutActorInBarrel, where is Mia ?");
+        return 1;
+    }
+    if (!b || (b->classFlags & 3) != 1) {
+        SBError(false, "DVScript.cpp", 0xded, "Script Error: In PutActorInBarrel, the barrel is not valid");
+        return 1;
+    }
+    a->SetInBarrel(b);
     return 1;
 }
 int32_t ISetSkipData(VMCore&, const int32_t* p) {
