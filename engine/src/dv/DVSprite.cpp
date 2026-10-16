@@ -716,6 +716,47 @@ int DVSprite::PerformVirginIncrement(int p) {
     return ended ? 3 : r;
 }
 
+// DVSprite::IncrementFrameModulated (0x0839b000): the loop (progressions 0 and 6) with each
+// frame's duration times m
+bool DVSprite::IncrementFrameModulated(float m, int p) {
+    if (p != 0 && p != 6) return false;
+    const auto& R = Rows();
+    if (row >= R.size()) return false;
+    const DVspriteScript& r = R[row];
+    unsigned n = count(r);
+    if (n == 0) return false;
+    uint16_t t = (uint16_t)(tick + 1);
+    tick = t;
+    unsigned e = entry;
+    auto scaled = [&](unsigned i) { return (unsigned)((int)((float)dur(r, i) * m) & 0xffff); };
+    if (scaled(e) < t) {
+        tick = 0;
+        t = 0;
+        e = e + 1;
+        entry = (uint16_t)e;
+    }
+    if (n <= (e & 0xffff)) {
+        entry = 0;
+        e = 0;
+    }
+    e &= 0xffff;
+    if (e == n - 1) {
+        if (t == scaled(e)) return true;
+        if (dur(r, e) == 0) return true;
+    }
+    return false;
+}
+
+int DVSprite::PerformIncrementModulated(float m, int p) {
+    bool ended = IncrementFrameModulated(m, p);
+    int res = 2;
+    if (tick == 0) {
+        const DVspriteScript* cr = CurrentRow();
+        res = (cr && entry == cr->keyEntry) ? 0 : 2;
+    }
+    return ended ? 3 : res;
+}
+
 // DVSprite::ResetSpriteFrame (0x0839b5b0)
 void DVSprite::ResetSpriteFrame(bool toEnd) {
     if (toEnd) {

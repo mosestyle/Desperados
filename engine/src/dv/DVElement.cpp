@@ -1,4 +1,6 @@
 #include "dv/DVElement.h"
+#include "dv/DVPatch.h"
+#include "dv/DVDoor.h"
 #include "dv/DVDoor.h"
 #include "dv/DVSector.h"
 
@@ -62,6 +64,7 @@ const char* DVElement::KindName() const {
     case KIND_OBJECT: return "object";
     case KIND_TARGET: return "target";
     case KIND_FX: return "scenery";
+    case KIND_MOBILE: return "cart";
     }
     if (kind >= 0x210 && kind <= 0x215) return "animal";
     if (kind >= 0x1101 && kind <= 0x1117) return "item";
@@ -736,6 +739,8 @@ bool DVElementActor::StepOrders() {
         // (getting on a ladder) plays to its end and puts him there. At the door's middle he
         // passes it (DVElementActor::Execute: PassDoor)
         uint32_t a = o.anim;
+        // DVElementActor::Translate 0x16: the door opens (its patch)
+        if (first && o.door && o.door->patch) o.door->patch->Apply();
         if (!s->HasAnimation(a)) a = s->HasAnimation(CMD_WALK) ? (uint32_t)CMD_WALK : a;
         if (!s->HasAnimation(a) || InBuilding()) {
             pos.SetPositionMap(o.goal);
@@ -1765,7 +1770,16 @@ void DVElementFX::Refresh(uint32_t screen, float zoom, const SBGeoBoundingBox2D&
 // DVElementFX::Hourglass (0x0824b330)
 void DVElementFX::Hourglass() {
     if (!active) return;
-    sprite->PerformVirginIncrement(0);
+    if (!patch) {
+        sprite->PerformVirginIncrement(0);
+        return;
+    }
+    // a patch's animation: the change plays forwards to apply it, backwards to take it off
+    int r = sprite->PerformVirginIncrement(patch->applied && patch->animating ? 0xd : 0);
+    if (r == 3 && patch->animating) {
+        patch->animating = false;
+        patch->ApplyFinal();
+    }
 }
 
 // DVElementTarget::LoadStateFromFile (0x08265870)

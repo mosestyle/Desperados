@@ -16,6 +16,7 @@
 #include "dv/DVElement.h"
 #include "dv/DVEngine.h"
 #include "dv/DVScript.h"
+#include "dv/DVPatch.h"
 #include "dv/DVDoor.h"
 #include "dv/DVSector.h"
 #include "dv/DVSequence.h"
@@ -92,6 +93,19 @@ int main(int argc, char** argv) {
             for (uint32_t a = 0; a < 0xb9; ++a)
                 if (e->sprite->HasAnimation(a)) fprintf(stderr, " %x(%.0f)", a, e->sprite->GetDistanceForAnimation(a));
             fprintf(stderr, "\n");
+        }
+    // DVPATCHES: the level's patches; DVAPPLY=i applies one at the start
+    if (getenv("DVPATCHES"))
+        for (size_t i = 0; i < engine.Grid()->Patches().size(); ++i) {
+            const DVPatch* p = engine.Grid()->Patches()[i].get();
+            fprintf(stderr, "patch %zu at %.0f,%.0f layer %u: trigger %d permanent %d fx %d door %d zone %d masks %zu/%zu obstacles %zu/%zu\n", i,
+                    p->at.x, p->at.y, p->layer, p->trigger, p->permanent, p->hasFx, p->door != nullptr, p->zone != nullptr,
+                    p->masksOff.size(), p->masksOn.size(), p->obstaclesOff.size(), p->obstaclesOn.size());
+        }
+    if (const char* ap = getenv("DVAPPLY"))
+        if (DVPatch* p = engine.Grid()->Patch((unsigned)atoi(ap))) {
+            p->Apply();
+            engine.camera = p->at - engine.screen * 0.25f;
         }
     // DVDOORS: the level's doors
     if (getenv("DVDOORS"))

@@ -1,4 +1,5 @@
 #include "dv/DVDoor.h"
+#include "dv/DVPatch.h"
 
 #include <algorithm>
 #include <cmath>
@@ -80,9 +81,14 @@ int DVDoor::LoadFromFile(SBFile& f, DVFastFindGrid& grid, DVSectorMotionArea* bu
     }
     uint16_t p = f.U16();
     if (p == 0xffff) return n + 0x26;
-    f.U8();  // the patch is applied when one passes
-    f.U8();  // ... and shown on the door's element
-    patch = p;
+    bool whenPassing = f.U8() != 0;  // the patch is applied when one passes
+    bool locks = f.U8() != 0;        // ... and changes the door's locks
+    DVPatch* pt = grid.Patch(p);
+    if (pt && locks) {
+        pt->door = this;
+        for (int i = 0; i < 4; ++i) pt->doorFlags[i] = patchBytes[i];
+    }
+    patch = whenPassing ? pt : nullptr;
     return n + 0x28;
 }
 
@@ -336,7 +342,7 @@ bool DVFastFindGrid::GetSectorScreen(const SBGeoPoint2D& p, DVSectorMotionArea*&
         DVSector* liftPlane = nullptr;
         DVSector* other = nullptr;
         for (DVSector* s : layerSectors[(size_t)l]) {
-            if (!s->box.IsInside_p(p) || !s->polygon.IsInside_p(p)) continue;
+            if (!s->flag30 || !s->box.IsInside_p(p) || !s->polygon.IsInside_p(p)) continue;
             if (s->type & SECTOR_DOOR_PLANE) {
                 if (!doorPlane) doorPlane = s;
             } else if (s->type & SECTOR_LIFT) {
@@ -465,7 +471,7 @@ void DVElementActor::PassDoor(DVDoor* d, bool enter) {
     } else {
         Teleport(pos.posMap, pos.layer, pos.sector);
     }
-    if (d->patch >= 0 && DVEngine::mpEngine) DVEngine::mpEngine->patches.insert(d->patch);
+    if (d->patch) d->patch->Apply();  // (closing behind him)
 }
 
 // the lift's animation for a move from `from` to `to` (DVElementActor::Translate 0x17 in a lift:

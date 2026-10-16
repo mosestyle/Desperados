@@ -1,4 +1,8 @@
 #include "dv/DVFastFindGrid.h"
+#include "dv/DVMobile.h"
+#include "dv/DVPatch.h"
+#include "dv/DVEngine.h"
+#include <algorithm>
 
 #include "dv/DVDoor.h"
 #include "dv/DVMask.h"
@@ -438,6 +442,15 @@ void DVFastFindGrid::GetObstacles(std::vector<DVSightObstacle*>& out, uint16_t l
                     }
                 if (!seen) out.push_back(o);
             }
+    // DVFastFindGrid::GetMobileObstacles (0x082b3280): the carts' obstacles, where they are now
+    if (DVEngine::mpEngine)
+        for (DVElementMobile* m : DVEngine::mpEngine->mobiles) {
+            if (!m->active || !m->box.valid || !m->box.IsIntersecting(b)) continue;
+            for (auto& o : m->obstacles)
+                if (o->enabled && (o->flags & type) == type && o->box.IsIntersecting(b) &&
+                    std::find(out.begin(), out.end(), o.get()) == out.end())
+                    out.push_back(o.get());
+        }
 }
 
 // DVFastFindGrid::ComputeRayEquation (0x082b4b40): the ray's height as a function of x (returns
@@ -635,4 +648,20 @@ void DVFastFindGrid::GetMasksAppliedToCharacter(std::vector<DVMask*>& out, uint1
         if (m->box.IsIntersecting(b) && m->IsAppliedToPointCharacter(feet)) out[w++] = m;
     }
     out.resize(w);
+}
+
+// DVEngine::LoadPatchFromFile (0x0826b810)
+int DVFastFindGrid::LoadPatchesFromFile(SBFile& f) {
+    f.version = f.U32();
+    if (f.version != 10)
+        SBError(true, "DVEngine.cpp", 0x6ab, "Version Check Failed on %s (file version %u, expected version %u).", "Hunk Patch",
+                f.version, 10);
+    uint16_t n = f.U16();
+    int r = 6;
+    for (uint16_t i = 0; i < n; ++i) {
+        auto* p = new DVPatch();
+        patches.emplace_back(p);
+        r += p->LoadFromFile(f, *this);
+    }
+    return r;
 }

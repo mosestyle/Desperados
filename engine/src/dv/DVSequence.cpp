@@ -1,4 +1,5 @@
 #include "dv/DVSequence.h"
+#include "dv/DVMobile.h"
 
 #include "dv/DVElement.h"
 #include "dv/DVEngine.h"
@@ -73,6 +74,7 @@ bool DVSequenceElement::ExecutedImmediately() {
     }
     if (actorSide) {
         if (auto* a = dynamic_cast<DVElementActor*>(actor)) a->ExecuteImmediately(this);
+        else if (auto* m = dynamic_cast<DVElementMobile*>(actor)) m->ExecuteImmediately(this);
         else SetState(SEQ_DONE);
         return true;
     }

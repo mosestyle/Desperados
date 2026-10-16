@@ -53,7 +53,7 @@ public:
     uint16_t layerB = 0;            // +0x2e
     uint32_t act[4] = {3, 3, 3, 3}; // +0x78 .. +0x84: in (first, second half), out (first, second)
     DVSector* plane = nullptr;      // +0x88 the picture one clicks on
-    int32_t patch = -1;             // +0x8c the patch shown when it opens
+    class DVPatch* patch = nullptr; // +0x8c the patch applied as one goes through (the door opening)
 };
 
 // the animation of a move inside a lift (up or down the stairs, the ladder, the wall)

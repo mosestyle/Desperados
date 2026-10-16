@@ -67,6 +67,9 @@ public:
     // animation stepping (one call per 25 Hz tick); returns true at the end of the row
     bool IncrementFrame(int progression);
     int PerformVirginIncrement(int progression);
+    // DVSprite::PerformIncrementModulated (0x0839b1d0): the frames last `m` times as long
+    int PerformIncrementModulated(float m, int progression);
+    bool IncrementFrameModulated(float m, int progression);  // 0x0839b000
     void ResetSpriteFrame(bool toEnd);
     bool IsEmptyFrame() const;
     uint16_t GetCurrentSoundID() const;

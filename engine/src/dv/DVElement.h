@@ -24,6 +24,7 @@ enum : uint16_t {
     KIND_VILLAIN = 0x101, KIND_CIVILIAN = 0x102, KIND_HORSE = 0x201,
     KIND_ANIMAL1 = 0x210,  // .. 0x215
     KIND_OBJECT = 0x301, KIND_TARGET = 0x800, KIND_FX = 0x1001,
+    KIND_MOBILE = 0x1200,  // (not in the file: the CART hunk's elements)
 };
 
 class DVElement {

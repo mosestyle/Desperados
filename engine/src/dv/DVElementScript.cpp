@@ -191,7 +191,7 @@ void DVElementActor::ExecuteImmediately(DVSequenceElement* e) {
         if (ai) ai->ScriptUnlockAI();
         break;
     case 0xa8:  // a custom event to his script (IActorNPCScript::FilterEvent)
-        if (DVScript::mpInstance) DVScript::mpInstance->FilterEvent(this, nullptr, (uint16_t)e->param);
+        if (DVScript::mpInstance) DVScript::mpInstance->FilterEvent(this, this, (uint16_t)e->param);  // (the source is himself)
         break;
     case 0xab:  // SayRemark / HeroSpeaking: the voice comes with the sound
         break;

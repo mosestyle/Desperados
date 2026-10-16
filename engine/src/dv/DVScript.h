@@ -62,7 +62,7 @@ public:
     // IActorNPCScript::FilterEvent: the NPC's script sees an event; false = it drops it
     bool FilterEvent(DVElementActor* npc, DVElement* source, int event);
     // IWaypointScript::ReachPoint
-    void ReachPoint(DVWaypoint* w, DVElementActor* npc);
+    void ReachPoint(DVWaypoint* w, DVElement* npc);
     // the zones: who is in which (DVElementActor::CheckForLineCrossing, DVSectorScript::Enter /
     // Leave, InitializeScriptSectorOccupants)
     void CheckZones(DVElementActor* a, bool silent);
@@ -87,6 +87,7 @@ public:
     // while the elements' Initialize run they are still being loaded: the scripts see as many
     // elements as were loaded before this one (IGetActor(IGetNumberOfActorsInEngine()) = itself)
     int32_t loadingCount = -1;
+    int32_t elementCount = -1;  // the ELEM hunk's elements (GetNumberOfActorsInEngine); the mobile ones follow
 
     // ---- the sequence being recorded (IStart ... IThanx) -------------------------------------------
     DVSequence* mpSequence = nullptr;    // 0x085dd7e8

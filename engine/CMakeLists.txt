@@ -27,6 +27,7 @@ file(GLOB APP_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/app/*.cp
 # the engine itself, without window or GL: also used by the desktop test tools
 add_library(dvengine STATIC ${ENGINE_SOURCES})
 target_include_directories(dvengine PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_include_directories(dvengine PRIVATE ${REPO}/third_party/stb)
 set_target_properties(dvengine PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_compile_options(dvengine PRIVATE -Wall -Wno-unused-parameter -Wno-sign-compare)
 if(ANDROID)

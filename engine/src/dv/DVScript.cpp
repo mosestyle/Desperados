@@ -1,4 +1,6 @@
 #include "dv/DVScript.h"
+#include "dv/DVMobile.h"
+#include "dv/DVPatch.h"
 
 #include <set>
 #include <cmath>
@@ -171,6 +173,7 @@ int32_t IInflictPain(VMCore&, const int32_t* p) {
 int32_t IGetNumberOfActorsInEngine(VMCore&, const int32_t*) {
     if (!S()) return 0;
     if (S()->loadingCount >= 0) return S()->loadingCount;
+    if (S()->elementCount >= 0) return S()->elementCount;
     return (int32_t)S()->marrayElement.size();
 }
 // DVScript::GetActor (0x0834ab60): the level's elements in their loading order
@@ -565,13 +568,22 @@ int32_t IResetAnim(VMCore&, const int32_t* p) {
     if ((e->classFlags & 3) == 0) e->sprite->ResetSpriteFrame(false);
     return 1;
 }
-int32_t IIsPatchApplied(VMCore&, const int32_t* p) { return Eng()->patches.count(p[0]) != 0; }
+// DVScript::IsPatchApplied / ApplyPatch / ResetPatch (0x08349fb0 / fd0 / 0x0834a010)
+DVPatch* PatchOf(int32_t i) {
+    DVPatch* pt = Eng() && Eng()->Grid() ? Eng()->Grid()->Patch((uint16_t)i) : nullptr;
+    if (!pt) SBError(false, "DVScript.cpp", 0x9e4, "Script Error: no patch %d", i);
+    return pt;
+}
+int32_t IIsPatchApplied(VMCore&, const int32_t* p) {
+    DVPatch* pt = PatchOf(p[0]);
+    return pt && pt->applied;
+}
 int32_t IApplyPatch(VMCore&, const int32_t* p) {
-    Eng()->patches.insert(p[0]);
+    if (DVPatch* pt = PatchOf(p[0])) pt->Apply();
     return 1;
 }
 int32_t IResetPatch(VMCore&, const int32_t* p) {
-    Eng()->patches.erase(p[0]);
+    if (DVPatch* pt = PatchOf(p[0])) pt->ForceReset();
     return 1;
 }
 int32_t IStartSequenceRecording(VMCore&, const int32_t*) { return S()->StartSequenceRecording(); }
@@ -666,6 +678,9 @@ int32_t IRecordMove(VMCore&, const int32_t* p) {
     DVObjectScript* o = Point(p[1]);
     if (!o || !IsChar(a)) {
         SBError(false, "DVScript.cpp", 0xbf9, "Script Error: You tried to create a move sequence with an illegal location or actor");
+        if (DVSequenceManager::trace)
+            SBLog("  (actor %d %s, location %d, in %s)", p[0], a ? a->KindName() : "-", p[1],
+                  S()->vm.current && S()->vm.current->cls ? S()->vm.current->cls->name.c_str() : "?");
         return 0;
     }
     static const uint32_t k[6] = {3, 5, 3, 0xf0, 0xf1, 0x85};
@@ -1128,8 +1143,20 @@ DV_SKIPPED(RecordRestoreAnim)
 DV_SKIPPED(RecordEnterBarrel)
 DV_SKIPPED(RecordLeaveBarrel)
 DV_SKIPPED(RecordTieCorpse)
-DV_SKIPPED(RecordStartMobileElement)
-DV_SKIPPED(RecordStopMobileElement)
+// DVScript::RecordStartMobileElement / RecordStopMobileElement (0x083573a0 / 0x08357440): the
+// mobile element's number (in the CART hunk)
+static int32_t RecordMobile(uint32_t cmd, int32_t i) {
+    if (!Recording(cmd == 0xad ? "start mobile" : "stop mobile")) return 0;
+    DVEngine* e = Eng();
+    if (!e || i < 0 || (size_t)i >= e->mobiles.size()) {
+        SBError(false, "DVScript.cpp", 0x1b2c, "Script Error: no mobile element %d", i);
+        return 0;
+    }
+    RecQuick(cmd, e->mobiles[(size_t)i], 0);
+    return 1;
+}
+int32_t IRecordStartMobileElement(VMCore&, const int32_t* p) { return RecordMobile(0xad, p[0]); }
+int32_t IRecordStopMobileElement(VMCore&, const int32_t* p) { return RecordMobile(0xae, p[0]); }
 
 // ---- globals, This, the rest ----------------------------------------------------------------------
 
@@ -1611,10 +1638,11 @@ int DVScript::CheckVictoryCondition(uint32_t seconds) {
 bool DVScript::FilterEvent(DVElementActor* npc, DVElement* source, int event) {
     VMInstance* inst = InstanceOf(npc);
     if (!inst || !inst->cls->Function("FilterEvent")) return true;
+    if (DVSequenceManager::trace) SBLog("  event %d to %s #%d", event, inst->cls->name.c_str(), Handle(npc));
     return CallFor(inst, npc, "FilterEvent", {Handle(source), event}) != 0;
 }
 
-void DVScript::ReachPoint(DVWaypoint* w, DVElementActor* npc) {
+void DVScript::ReachPoint(DVWaypoint* w, DVElement* npc) {
     if (!w || w->script.empty() || !loaded) return;
     std::string name = w->script.c_str();
     auto it = waypointInstances.find(name);

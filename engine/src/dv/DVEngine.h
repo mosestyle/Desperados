@@ -62,6 +62,7 @@ public:
     std::string levelName;
     std::string backgroundName;
     const std::vector<DVElement*>& Elements() const { return elements; }
+    std::vector<class DVElementMobile*> mobiles;  // +0xddc (the CART hunk)
     DVFastFindGrid* Grid() const { return grid.get(); }
     DVPathFinder* PathFinder() const { return pathFinder.get(); }
     uint32_t BackgroundSurface() const { return background; }
@@ -149,7 +150,6 @@ public:
     bool forceVictoryCheck = false;  // +0xd24
     int32_t skipData = -1;           // ISetSkipData: the intro can be skipped
     bool mapShown = false;
-    std::set<int32_t> patches;       // the patches the scripts applied
     void StateSelectActor(uint16_t kind);   // 0x082a51c0 (ISelectPC)
     // every character (heroes, NPCs, animals) of the level, on the map or not
     const std::vector<DVElementActor*>& Characters() const { return characters; }
@@ -165,6 +165,7 @@ private:
     std::unique_ptr<DVPathFinder> pathFinder;  // +0xe08
     std::vector<std::unique_ptr<DVElement>> ownElements;
     std::vector<DVElement*> elements;       // +0x84
+    int LoadMobileElementsFromFile(SBFile& f);
     uint32_t background = 0;   // +0xba4
     uint32_t minimap = 0;      // +0xba8
     std::vector<DVElementActor*> heroes;

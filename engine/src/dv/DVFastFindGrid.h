@@ -101,6 +101,10 @@ public:
     DVDoor* NearestDoor(const SBGeoPoint2D& p, float maxDist) const;
     void AddLayerSector(DVSector* s, uint16_t layer);
     void AdoptSector(DVSector* s);  // the grid owns it, and lists it by its number
+    // ---- patches (PAT, DVEngine::LoadPatchFromFile 0x0826b810; +0x1e4) -----------------------
+    int LoadPatchesFromFile(SBFile& f);
+    class DVPatch* Patch(unsigned i) const { return i < patches.size() ? patches[i].get() : nullptr; }
+    const std::vector<std::unique_ptr<class DVPatch>>& Patches() const { return patches; }
 
     uint16_t gridW = 0, gridH = 0;    // +0x18, +0x1a
     SBGeoBoundingBox2D box;           // +4
@@ -128,6 +132,7 @@ private:
     std::vector<std::unique_ptr<DVSector>> ownSectors;
     std::vector<std::unique_ptr<DVSightObstacle>> ownObstacles;
     std::vector<std::unique_ptr<DVMask>> ownMasks;
+    std::vector<std::unique_ptr<class DVPatch>> patches;
     void EnsureCells();
 };
 

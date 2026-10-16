@@ -1,4 +1,6 @@
 #include "dv/DVEngine.h"
+#include "dv/DVMobile.h"
+#include "dv/DVPatch.h"
 
 #include "dv/DVArtificialIntelligence.h"
 #include "dv/DVHikingGuide.h"
@@ -114,6 +116,8 @@ bool DVEngine::LoadStateFromFile(const std::string& name) {
             done = grid->LoadBuildingsFromFile(f, actors);
             break;
         }
+        case 0x43415254: done = LoadMobileElementsFromFile(f); break;       // CART
+        case 0x50415420: done = grid->LoadPatchesFromFile(f); break;          // PAT
         default: break;  // the others come with the next steps
         }
         if (done >= 0 && (uint32_t)done != len)
@@ -223,7 +227,11 @@ bool DVEngine::LoadStateFromFile(const std::string& name) {
     // the mission's scripts (DVScript::Initialize): StartUp and the scripted elements
     {
         std::vector<DVElement*> all;
-        for (auto& e : ownElements) all.push_back(e.get());
+        for (auto& e : ownElements)
+            if (!dynamic_cast<DVElementMobile*>(e.get()) && !dynamic_cast<DVElementFXMasked*>(e.get())) all.push_back(e.get());
+        // (DVScript::GetActor: the mobile elements come after the others)
+        script->elementCount = (int32_t)all.size();
+        for (DVElementMobile* m : mobiles) all.push_back(m);
         script->Initialize(this, all, levelName);
     }
     if (!selected || !selected->playable || (!selected->active && !selected->InBuilding())) SelectNextPlayable();
@@ -292,6 +300,29 @@ int DVEngine::LoadBackgroundFromFile(SBFile& f) {
     draw->UploadPicture(minimap, mini.Pixels().data(), mini.GetWidth(), mini.GetHeight());
     int b = f.Tell();
     return (len + 6) - a + b + 4 - 4;
+}
+
+// DVEngine::LoadMobileElementsFromFile (0x0826cc50)
+int DVEngine::LoadMobileElementsFromFile(SBFile& f) {
+    f.version = f.U32();
+    if (f.version != 5)
+        SBError(true, "DVEngine.cpp", 0x6e9, "Version Check Failed on %s (file version %u, expected version %u).",
+                "Hunk mobile elements", f.version, 5);
+    uint16_t count = f.U16();
+    int n = 6;
+    for (uint16_t i = 0; i < count; ++i) {
+        auto* m = new DVElementMobile();
+        ownElements.emplace_back(m);
+        elements.push_back(m);
+        mobiles.push_back(m);
+        n += m->LoadStateFromFile(f);
+        for (DVElementFXMasked* p : m->parts) {
+            ownElements.emplace_back(p);
+            elements.push_back(p);
+        }
+        // (the train's railroad sector, CreateRailroadSector, comes with the train)
+    }
+    return n;
 }
 
 // DVEngine::LoadElemFromFile (0x0826b930)
@@ -429,6 +460,23 @@ void DVEngine::PerformHourglass() {
         cameraMoved = true;
     }
     for (DVElement* e : elements) e->Hourglass();
+    // the patches a hero walks into (DVElementActor::CheckForLineCrossing over their sector's
+    // DVLinePatch lines): on as he comes in, off when the last one has left
+    for (const auto& p : grid->Patches()) {
+        if (!p->zone || !p->trigger) continue;
+        for (DVElementActor* h : heroes) {
+            bool in = h->active && h->sprite->pos.layer == p->layer && p->zone->box.IsInside_p(h->sprite->pos.posMap) &&
+                      p->zone->polygon.IsInside_p(h->sprite->pos.posMap);
+            bool was = std::find(p->inside.begin(), p->inside.end(), h) != p->inside.end();
+            if (in && !was) {
+                p->Enter(h);
+                if (!p->applied) p->Apply();
+            } else if (!in && was) {
+                p->Leave(h);
+                if (p->applied && p->inside.empty()) p->Apply();
+            }
+        }
+    }
     // the zones the characters came into or left
     if (script && script->loaded)
         for (DVElementActor* a : characters)
