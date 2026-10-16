@@ -236,6 +236,11 @@ public:
     DVElementActor* carried = nullptr;  // the body on his shoulder
     // ---- Mia's barrel (DVKung +0x2d4) -------------------------------------------------------------
     DVElement* barrel = nullptr;
+    // the heroes' supplies (DVScript::Get / SetPersistentProperty 0..8: Sam's dynamite, Doc's
+    // bullets, doses and flasks, Kate's cards, Mia's lumina and peanuts, Sanchez's stones and
+    // tequila), from their items in the level (DVEngine::LoadElemFromFile)
+    int16_t supplies[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
+    bool hasSupply[9] = {false, false, false, false, false, false, false, false, false};
     class DVElementMobile* pushing = nullptr;  // Sanchez's cart (DVElementMobile::Hook)
     void ReleasePush();                         // DVSanchez::SendCondolationCard 0x85
     bool BuildPush(class DVElementMobile* m, std::deque<DVOrder>& out) const;

@@ -392,6 +392,36 @@ int DVEngine::LoadElemFromFile(SBFile& f) {
         if (onMap) elements.push_back(e);
         n += 2 + k;
     }
+    // the heroes' supplies: their items' counts (DVEngine::LoadElemFromFile 0x1101..0x1115)
+    {
+        auto hero = [&](uint16_t k) -> DVElementActor* {
+            for (auto& o : ownElements)
+                if (o->kind == k) return dynamic_cast<DVElementActor*>(o.get());
+            return nullptr;
+        };
+        for (auto& o : ownElements) {
+            auto* it = dynamic_cast<DVElementObject*>(o.get());
+            if (!it) continue;
+            int prop = -1;
+            uint16_t who = 0;
+            switch (it->kind) {
+            case 0x1101: prop = 0, who = KIND_SAM; break;
+            case 0x1103: prop = 8, who = KIND_SANCHEZ; break;
+            case 0x1106: prop = 4, who = KIND_KATE; break;
+            case 0x1109: prop = 3, who = KIND_DOC; break;
+            case 0x110a: prop = 6, who = KIND_MIA; break;
+            case 0x110d: if (!it->active) prop = 7, who = KIND_SANCHEZ; break;
+            case 0x110e: prop = 5, who = KIND_MIA; break;
+            case 0x1115: if (!it->active) prop = 1, who = KIND_DOC; break;
+            default: break;
+            }
+            if (prop < 0) continue;
+            if (DVElementActor* h = hero(who)) {
+                h->supplies[prop] = (int16_t)it->u9c;
+                h->hasSupply[prop] = true;
+            }
+        }
+    }
     // the saddles (0x110b) go on their horse (its index among the elements on the map)
     for (DVElement* e : std::vector<DVElement*>(elements))
         if (e->kind == 0x110b && e->active) {

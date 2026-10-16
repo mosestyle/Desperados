@@ -409,15 +409,52 @@ int32_t IIsActionAvailable(VMCore&, const int32_t* p) {
     if (!a || (a->classFlags & 0xf) != 0xf || (uint32_t)p[1] >= 6) return 0;
     return a->actionAvailable[p[1]];
 }
+// DVScript::Get / SetPersistentProperty (0x0834bad0 / 0x0834bf40): the heroes' supplies (0..8),
+// a human's life (10), his concussion (12), an NPC's bullets (13)
+static const uint16_t kSupplyOwner[9] = {KIND_SAM, KIND_DOC, KIND_DOC, KIND_DOC, KIND_KATE, KIND_MIA, KIND_MIA, KIND_SANCHEZ, KIND_SANCHEZ};
 int32_t ISetPersistentProperty(VMCore&, const int32_t* p) {
     DVElement* e = DVScript::Element(p[0]);
-    gPersistent[((int64_t)(e ? e->kind : 0) << 32) | (uint32_t)p[1]] = p[2];
+    auto* a = dynamic_cast<DVElementActor*>(e);
+    if (!e) {
+        SBError(false, "DVScript.cpp", 0x7f3, "Script Error: Trying to set the property of an invalid actor.");
+        return 0;
+    }
+    int k = p[1];
+    if (k >= 0 && k < 9) {
+        if (!a || a->kind != kSupplyOwner[k]) {
+            SBError(false, "DVScript.cpp", 0x8a0, "Script Error: Trying to set a supply of the wrong character.");
+            return 0;
+        }
+        a->supplies[k] = (int16_t)p[2];
+        return 1;
+    }
+    if (k == 10 && a) a->life = (int16_t)p[2];
+    else if (k == 12 && a) a->SetConcussion((uint16_t)p[2]);
+    else if (k == 13 && a) a->ammo = (int16_t)p[2];
+    else gPersistent[((int64_t)e->kind << 32) | (uint32_t)k] = p[2];
     return 1;
 }
 int32_t IGetPersistentProperty(VMCore&, const int32_t* p) {
     DVElement* e = DVScript::Element(p[0]);
-    auto it = gPersistent.find(((int64_t)(e ? e->kind : 0) << 32) | (uint32_t)p[1]);
-    return it == gPersistent.end() ? 0 : it->second;
+    auto* a = dynamic_cast<DVElementActor*>(e);
+    if (!e) {
+        SBError(false, "DVScript.cpp", 0x7f3, "Script Error: Trying to set the property of an invalid actor.");
+        return -1;
+    }
+    int k = p[1];
+    if (k >= 0 && k < 9) {
+        if (!a || a->kind != kSupplyOwner[k]) {
+            SBError(false, "DVScript.cpp", 0x7fc, "Script Error: Trying to get a supply of the wrong character.");
+            return -1;
+        }
+        if ((k == 5 || k == 6) && !a->hasSupply[k]) return 0;  // (Mia without the bag)
+        return a->supplies[k];
+    }
+    if (k == 10) return a ? a->life : -1;
+    if (k == 12) return a ? a->concussion : -1;
+    if (k == 13) return a ? a->ammo : -1;
+    auto it = gPersistent.find(((int64_t)e->kind << 32) | (uint32_t)k);
+    return it == gPersistent.end() ? -1 : it->second;
 }
 // DVScript::SetAIAlertStatus (0x08350460)
 int32_t ISetAIAlertStatus(VMCore&, const int32_t* p) {

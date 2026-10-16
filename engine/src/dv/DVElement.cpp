@@ -1735,6 +1735,9 @@ void DVElementActor::RefreshDetection() {
         // is seen anyway when she shows her leg (action state 7) or after a scare (+0x24c)
         const DVElementActor* h = heroes[i];
         bool look = true;
+        // in a cut scene the heroes play their part: no one spots them (mission 20: the riders
+        // waiting for their cue would shoot Cooper running by)
+        if (e->briefing && h->scriptElement) look = false;
         if (b->attitude == 1) look = kind == KIND_VILLAIN && h->IsObviouslyHostile();
         if (h->kind == KIND_KATE) look = h->actionState == 7 || look || b->yellowBack != 0;
         // DVArtificialMalignity::EventViewStandardProcedure: a prisoner held at gunpoint is no
