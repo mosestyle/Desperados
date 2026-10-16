@@ -9,6 +9,7 @@ on:
       - '.github/workflows/original.yml'
       - 'engine/**'
       - '.github/workflows/engine.yml'
+      - 'third_party/stb/**'
   workflow_dispatch:
 
 permissions:
