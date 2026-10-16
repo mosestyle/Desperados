@@ -188,8 +188,22 @@ void DVElementMobile::Update() {
     if (speed != 0.0f) Move(dir * speed);
 }
 
+SBGeoVector2D DVElementMobile::RouteDirection() const {
+    size_t n = path.Count();
+    if (n < 2) return SBGeoVector2D(0, 0);
+    const DVWaypoint* a = (*path.waypoints)[0].get();
+    const DVWaypoint* b = (*path.waypoints)[n - 1].get();
+    if (!a || !b) return SBGeoVector2D(0, 0);
+    return SBGeoVector2D((float)b->x - (float)a->x, (float)b->y - (float)a->y);
+}
+
 void DVElementMobile::Move(const SBGeoVector2D& v) {
     MoveMap(sprite->pos, v);
+    // Sanchez goes with it
+    if (hooked && hooked->sprite) {
+        MoveMap(hooked->sprite->pos, v);
+        hooked->sprite->pos.ComputePositionAll();
+    }
     box = box + v;
     pushPoint = pushPoint + v;
     for (auto& q : shape.polygon.pts) q = q + v;

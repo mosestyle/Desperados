@@ -24,6 +24,7 @@
 #include "dv/DVDialogue.h"
 #include "dv/DVElement.h"
 #include "dv/DVEngine.h"
+#include "dv/DVMobile.h"
 #include "dv/DVSprite.h"
 #include "sb/SBDrawManager.h"
 #include "sb/SBFile.h"
@@ -338,6 +339,12 @@ int main(int argc, char** argv) {
             else engine->ToggleWatched(n);
             return;
         }
+        // a cart: Sanchez pushes it (DVElementMobile::MouseClicked)
+        if (sel && sel->kind == KIND_SANCHEZ && !gAimMode)
+            if (DVElementMobile* m = engine->PushableAt(mp, slack)) {
+                engine->OrderPush(m);
+                return;
+            }
         // a horse: get on it
         if (engine->Selected() && !engine->Selected()->Horse())
             if (DVElementActor* h = engine->HorseAt(mp, 2.0f)) {

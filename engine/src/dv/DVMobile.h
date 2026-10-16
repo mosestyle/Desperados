@@ -32,6 +32,8 @@ public:
     // the scripts' Start / StopMobileElement (0xad / 0xae)
     void ExecuteImmediately(class DVSequenceElement* e);  // 0x082537e0
     void Move(const SBGeoVector2D& v);            // 0x0824c870
+    DVElementActor* hooked = nullptr;             // +0x1c4: Sanchez pushing it
+    SBGeoVector2D RouteDirection() const;         // its route's first to last waypoint
     void SetAnimationAllSprites(uint32_t anim);   // 0x0824d7f0
 
     std::vector<DVElementFXMasked*> parts;        // +0x94 (the engine owns them)

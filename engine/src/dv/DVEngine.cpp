@@ -688,6 +688,7 @@ void DVEngine::Apply(const Command& c) {
     case CMD_STOP: OrderStop(); break;
     case CMD_SKIP_BRIEFING: SkipBriefing(); break;
     case CMD_SKIP_LINE: PlayerSkipLine(); break;
+    case CMD_PUSH_CART: OrderPush(dynamic_cast<DVElementMobile*>(DVScript::Element(c.a))); break;
     default: break;
     }
 }
@@ -947,6 +948,36 @@ bool DVEngine::OrderMount(DVElementActor* h) {
     if (selected->Horse()) return false;
     std::deque<DVOrder> seq;
     if (!selected->BuildMount(h, seq)) return false;
+    selected->Launch(seq, true);
+    return true;
+}
+
+DVElementMobile* DVEngine::PushableAt(const SBGeoPoint2D& p, float slack) const {
+    for (DVElementMobile* m : mobiles) {
+        if (!m->active || !m->pushable) continue;
+        SBGeoBoundingBox2D b = m->box;
+        for (DVElementFXMasked* part : m->parts) {
+            if (!part->sprite) continue;
+            part->sprite->IsOnScreen(SBGeoBoundingBox2D(-1e6f, -1e6f, 1e6f, 1e6f), 1.0f);  // (its box now)
+            const SBGeoBoundingBox2D& q = part->sprite->boxOnMap;
+            if (!q.valid) continue;
+            if (!b.valid) b = q;
+            b.p0 = SBGeoPoint2D(std::min(b.p0.x, q.p0.x), std::min(b.p0.y, q.p0.y));
+            b.p1 = SBGeoPoint2D(std::max(b.p1.x, q.p1.x), std::max(b.p1.y, q.p1.y));
+            b.valid = true;
+        }
+        b.p0 = b.p0 - SBGeoVector2D(slack, slack);
+        b.p1 = b.p1 + SBGeoVector2D(slack, slack);
+        if (b.IsInside_p(p)) return m;
+    }
+    return nullptr;
+}
+
+bool DVEngine::OrderPush(DVElementMobile* m) {
+    Record(CMD_PUSH_CART, DVScript::Handle(m));
+    if (!selected || selected->dead || missionFailed || userLocked || missionResult || !m) return false;
+    std::deque<DVOrder> seq;
+    if (!selected->BuildPush(m, seq)) return false;
     selected->Launch(seq, true);
     return true;
 }

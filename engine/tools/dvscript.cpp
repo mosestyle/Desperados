@@ -18,6 +18,7 @@
 #include "dv/DVScript.h"
 #include "sb/SBSound.h"
 #include "dv/DVPatch.h"
+#include "dv/DVMobile.h"
 #include "dv/DVDoor.h"
 #include "dv/DVSector.h"
 #include "dv/DVSequence.h"
@@ -286,6 +287,18 @@ int main(int argc, char** argv) {
                     DVElement* tg = engine.ShootableTargetAt(SBGeoPoint2D(x, y), 6.0f);
                     if (!tg) tg = engine.NPCAt(SBGeoPoint2D(x, y), 6.0f);
                     fprintf(stderr, "t %d: shoot at %.0f,%.0f: %s %s\n", t, x, y, tg ? tg->KindName() : "nothing", tg && engine.OrderShoot(tg) ? "ok" : "refused");
+                } else if (sscanf(one.c_str(), "%*d:select:%d", &hh) == 1) {
+                    if (hh >= 0 && (size_t)hh < engine.Heroes().size()) engine.PlayerSelect(engine.Heroes()[(size_t)hh]);
+                    fprintf(stderr, "t %d: select %s\n", t, engine.Selected() ? engine.Selected()->KindName() : "-");
+                } else if (sscanf(one.c_str(), "%*d:tp:%f,%f", &x, &y) == 2) {
+                    if (DVElementActor* h = engine.Selected()) {
+                        h->sprite->pos.SetPositionMap(SBGeoPoint2D(x, y));
+                        h->sprite->pos.ComputePositionAll();
+                    }
+                    fprintf(stderr, "t %d: put at %.0f,%.0f (test)\n", t, x, y);
+                } else if (sscanf(one.c_str(), "%*d:push:%f,%f", &x, &y) == 2) {
+                    DVElementMobile* m = engine.PushableAt(SBGeoPoint2D(x, y), 30.0f);
+                    fprintf(stderr, "t %d: push the cart at %.0f,%.0f: %s %s\n", t, x, y, m ? "found" : "none", m && engine.OrderPush(m) ? "ok" : "refused");
                 } else if (one.find(":reload") != std::string::npos) {
                     engine.OrderReload();
                     fprintf(stderr, "t %d: reload\n", t);
@@ -309,6 +322,19 @@ int main(int argc, char** argv) {
             }
         }
         engine.PerformHourglass();
+        if (getenv("DVMOBILES") && t == 0)
+            for (DVElementMobile* m : engine.mobiles)
+                for (size_t i = 0; m->path.waypoints && i < m->path.waypoints->size(); ++i) {
+                    const DVWaypoint* w = (*m->path.waypoints)[i].get();
+                    fprintf(stderr, "  mobile #%d waypoint %zu at %d,%d script %d:", DVScript::Handle(m), i, w->x, w->y, w->isScript);
+                    for (uint8_t b : w->data) fprintf(stderr, " %02x", b);
+                    fprintf(stderr, "\n");
+                }
+        if (getenv("DVMOBILES") && t % 50 == 0)
+            for (DVElementMobile* m : engine.mobiles)
+                fprintf(stderr, "t %d: mobile #%d at %.0f,%.0f push point %.0f,%.0f%s%s speed %.1f\n", t, DVScript::Handle(m),
+                        m->sprite->pos.posMap.x, m->sprite->pos.posMap.y, m->pushPoint.x, m->pushPoint.y, m->pushable ? " pushable" : "",
+                        m->stopped ? " stopped" : "", m->speed), fprintf(stderr, "    waypoint %u of %zu wait %d remaining %d\n", m->path.current, m->path.Count(), m->wait, m->remaining);
         if (getenv("DVHASH") && engine.ticks % atoi(getenv("DVHASH")) == 0)
             fprintf(stderr, "step %d: state %016llx\n", engine.ticks, (unsigned long long)stateHash());
         if (const char* cam = getenv("DVCAM")) {

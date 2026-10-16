@@ -1257,6 +1257,26 @@ int32_t IHideHint(VMCore&, const int32_t*) {
     Eng()->SetHint(0);
     return 0;
 }
+// DVScript::PutActorInBulding (0x08357120): into the house at once (off the map), at its first door
+int32_t IPutActorInBulding(VMCore&, const int32_t* p) {
+    auto* a = dynamic_cast<DVElementActor*>(DVScript::Element(p[0]));
+    DVFastFindGrid* g = Eng() ? Eng()->Grid() : nullptr;
+    if (!a || !g || p[1] < 0 || (size_t)p[1] >= g->Buildings().size()) {
+        SBError(false, "DVScript.cpp", 0x1f8f, "Building %d does not exist !", p[1]);
+        return 1;
+    }
+    DVSectorBuilding* b = g->Buildings()[(size_t)p[1]];
+    if (DVSectorBuilding* old = a->Building()) old->Leave(a);
+    a->active = false;
+    DVPositionInterface& pos = a->sprite->pos;
+    pos.layer = g->layerCount;
+    pos.sector = b;
+    if (!b->doors.empty() && b->doors[0]) pos.SetPositionMap(b->doors[0]->pB);
+    pos.ComputePositionAll();
+    pos.SetObstacle(nullptr);
+    b->Enter(a);
+    return 1;
+}
 int32_t IPutActorInBarrel(VMCore&, const int32_t* p) {
     auto* a = dynamic_cast<DVElementActor*>(DVScript::Element(p[0]));
     DVElement* b = DVScript::Element(p[1]);
@@ -1491,7 +1511,7 @@ void Install() {
     t[0xa2] = IEnableHorseUseFor;
     t[0xa3] = INothing;
     t[0xa4] = IRecordTieCorpse;
-    t[0xa5] = INothing;
+    t[0xa5] = IPutActorInBulding;
     t[0xa6] = ISetBuildingActive;
     t[0xa7] = IRecordStartMobileElement;
     t[0xa8] = IRecordStopMobileElement;

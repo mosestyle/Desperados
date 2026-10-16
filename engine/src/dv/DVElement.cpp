@@ -1,4 +1,5 @@
 #include "dv/DVElement.h"
+#include "dv/DVMobile.h"
 #include "dv/DVPatch.h"
 #include "dv/DVDoor.h"
 #include "dv/DVDoor.h"
@@ -512,6 +513,8 @@ bool DVElementActor::StepOrders() {
             return false;
         }
     }
+    // DVSanchez::SendCondolationCard 0x85: no longer pushing, the cart stops
+    if (pushing && (orders.empty() || orders.front().command != CMD_PUSH)) ReleasePush();
     // on a horse: the walks are the horse's (its own orders); he follows it
     if (DVElementActor* h = Horse(); h && pos.posture == POSTURE_RIDING &&
                                      (orders.empty() || orders.front().command != CMD_MOUNT)) {
@@ -892,6 +895,38 @@ bool DVElementActor::StepOrders() {
         }
         break;
     }
+    case CMD_PUSH: {
+        // DVSanchez::Execute 0x5c: hooked to the cart, he turns the other way round from its
+        // route (the animation is drawn so), then pushes: the cart goes, he goes with it
+        auto* m = dynamic_cast<DVElementMobile*>(o.target);
+        if (!m || !m->pushable) {
+            r = 4;
+            break;
+        }
+        if (!active) {
+            // (put away by a script: the cart goes on alone)
+            ReleasePush();
+            r = 3;
+            break;
+        }
+        if (first) {
+            SetStates(POSTURE_STANDING, 0);
+            m->hooked = this;
+            pushing = m;
+            SBGeoVector2D d = m->RouteDirection();
+            if (d.x != 0.0f || d.y != 0.0f) pos.directionWanted = (uint16_t)((SBGetSector0to15(d, 1.0f) & 0xf) ^ 8);
+        }
+        if ((pos.direction & 0xf) == (pos.directionWanted & 0xf)) {
+            m->stopped = false;
+            uint32_t a = s->HasAnimation(0x63) ? 0x63u : (uint32_t)CMD_WAIT;
+            s->PerformAction(o.id, a, m->speed == 0.0f ? 10 : 0, false);
+        } else {
+            pos.Turn();
+            s->PerformAction(o.id, s->HasAnimation(3) ? 3u : (uint32_t)CMD_WAIT, 0, false);
+        }
+        r = 2;
+        break;
+    }
     case CMD_TAKE_BODY: {
         // DVCooper::Execute 0x29: the pick-up; at its end the body is on his shoulder (it
         // follows him, 0x6c, posture 6)
@@ -1011,6 +1046,33 @@ uint32_t DVElementActor::CurrentCommand() const {
 }
 
 // DVSequenceManager::LaunchSequence for one actor: the orders replace the current ones
+void DVElementActor::ReleasePush() {
+    if (!pushing) return;
+    // the player's new order stops the cart; a script taking Sanchez off it (mission 19: his
+    // shove, then he steps back) lets it roll on
+    if (!scriptElement && active) pushing->stopped = true;
+    if (pushing->hooked == this) pushing->hooked = nullptr;
+    pushing = nullptr;
+}
+
+// DVElementMobile::MouseClicked: Sanchez goes behind the cart (its push point), then pushes it
+bool DVElementActor::BuildPush(DVElementMobile* m, std::deque<DVOrder>& out) const {
+    if (!m || !m->pushable || kind != KIND_SANCHEZ || carried || Horse()) return false;
+    SBGeoPoint2D at = m->pushPoint;
+    SBGeoVector2D d = at - sprite->pos.posMap;
+    if (std::max(std::fabs(d.x), std::fabs(d.y)) >= 4.0f) {
+        if (!BuildMove(at, CMD_WALK, POSTURE_STANDING, out, nullptr)) return false;
+        out.back().tolerance = 0;
+    }
+    DVOrder o;
+    o.id = DVOrder::NewID();
+    o.command = CMD_PUSH;
+    o.target = m;
+    o.goal = at;
+    out.push_back(o);
+    return true;
+}
+
 void DVElementActor::Launch(const std::deque<DVOrder>& seq, bool move) {
     if (scriptElement) EndScriptElement(false);
     orders = seq;

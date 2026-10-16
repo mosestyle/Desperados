@@ -83,7 +83,7 @@ public:
         float x = 0, y = 0;
     };
     enum : uint8_t { CMD_SELECT = 1, CMD_MOVE, CMD_SHOOT, CMD_CROUCH, CMD_MOUNT, CMD_TAKE, CMD_RELOAD, CMD_RUN, CMD_STOP,
-                     CMD_SKIP_BRIEFING, CMD_SKIP_LINE, CMD_DROP };
+                     CMD_SKIP_BRIEFING, CMD_SKIP_LINE, CMD_DROP, CMD_PUSH_CART };
     std::vector<Command> journal;
     bool replaying = false;
     void Record(uint8_t op, int32_t a = 0, float x = 0, float y = 0);
@@ -117,6 +117,9 @@ public:
     void OrderMakeRunning();
     // horses: the free horse under a map point, the selected hero gets on it
     DVElementActor* HorseAt(const SBGeoPoint2D& p, float slack) const;
+    // a cart Sanchez can push there (DVElementMobile::IsFocusable)
+    class DVElementMobile* PushableAt(const SBGeoPoint2D& p, float slack) const;
+    bool OrderPush(class DVElementMobile* m);
     bool OrderMount(DVElementActor* horse);
     // Cooper / Sanchez: to a body (out cold or dead) and on the shoulder
     bool OrderTakeBody(DVElementActor* body);

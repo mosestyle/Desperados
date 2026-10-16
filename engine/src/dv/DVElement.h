@@ -142,6 +142,7 @@ enum : uint32_t {
     CMD_ENTER_BARREL = 0x91,   // Mia into her barrel (DVKung 0xee, animation 0x63)
     CMD_LEAVE_BARREL = 0x92,   // ... out of it (DVKung 100, animation 0x64)     // Cooper's leap into the saddle (from a balcony, a roof)
     CMD_TAKE_BODY = 0x29,      // picking a body up
+    CMD_PUSH = 0x5c,           // Sanchez pushing a cart (DVSanchez::Execute 0x5c, animation 99)
     CMD_CARRY = 0x2a,          // walking with it
     CMD_DROP_BODY = 0x2b,      // putting it down
     CMD_CARRIED = 0x6c,        // the body on the shoulder
@@ -235,6 +236,9 @@ public:
     DVElementActor* carried = nullptr;  // the body on his shoulder
     // ---- Mia's barrel (DVKung +0x2d4) -------------------------------------------------------------
     DVElement* barrel = nullptr;
+    class DVElementMobile* pushing = nullptr;  // Sanchez's cart (DVElementMobile::Hook)
+    void ReleasePush();                         // DVSanchez::SendCondolationCard 0x85
+    bool BuildPush(class DVElementMobile* m, std::deque<DVOrder>& out) const;
     void SetInBarrel(DVElement* b);    // DVKung::SetInBarrel (0x082ef4d0)
     DVElementActor* carrier = nullptr;  // who carries him
     bool CanCarry() const { return kind == KIND_COOPER || kind == KIND_SANCHEZ; }
