@@ -84,6 +84,19 @@ int main(int argc, char** argv) {
                     a && a->ai ? (int)a->ai->role : (a ? -1000 - (int)a->profile : -1));
         }
         }
+    // DVLOCS=i,j,...: script locations (points and zones)
+    if (const char* lc = getenv("DVLOCS"))
+        for (const char* q = lc; q && *q; q = strchr(q, ',') ? strchr(q, ',') + 1 : nullptr) {
+            int i = atoi(q);
+            DVObjectScript* o = engine.Script()->Location(DVScript::kLocation + i);
+            if (!o) continue;
+            fprintf(stderr, "location %d: type %d at %.0f,%.0f layer %u", i, o->type, o->p.x, o->p.y, o->layer);
+            if (o->zone) {
+                fprintf(stderr, " zone area %u:", o->areaId);
+                for (auto& pt : o->zone->polygon.pts) fprintf(stderr, " %.0f,%.0f", pt.x, pt.y);
+            }
+            fprintf(stderr, " %s\n", o->scriptName.c_str());
+        }
     // DVANIMS=handle,...: the animations an element's sprite has (and their walking distance)
     if (const char* an = getenv("DVANIMS"))
         for (const char* q = an; q && *q; q = strchr(q, ',') ? strchr(q, ',') + 1 : nullptr) {
@@ -213,6 +226,10 @@ int main(int argc, char** argv) {
             }
         }
         engine.PerformHourglass();
+        if (const char* cam = getenv("DVCAM")) {
+            float cx = 0, cy = 0;
+            if (sscanf(cam, "%f,%f", &cx, &cy) == 2) engine.camera = SBGeoPoint2D(cx, cy) - engine.screen * 0.5f;
+        }
         if (engine.briefing != lastBriefing || engine.userLocked != lastLocked) {
             fprintf(stderr, "t %d (%ds): briefing %d, player locked %d\n", t, t / 25, engine.briefing, engine.userLocked);
             lastBriefing = engine.briefing;

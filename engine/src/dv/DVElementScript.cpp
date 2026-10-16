@@ -6,6 +6,7 @@
 #include "dv/DVArmsTrader.h"
 #include "dv/DVArtificialIntelligence.h"
 #include "dv/DVElement.h"
+#include <cstdlib>
 #include "dv/DVEngine.h"
 #include "dv/DVFastFindGrid.h"
 #include "dv/DVScript.h"
@@ -106,9 +107,16 @@ void DVElementActor::Instruct(DVSequenceElement* e) {
         break;
     }
     case 0x33:  // DVScript::RecordMountHorse: to the horse, on it
-    case 0x54:  // RecordJumpOnHorse
         if (!BuildMount(dynamic_cast<DVElementActor*>(e->target), seq)) SBLog("%s can't get on that horse", KindName());
         break;
+    case 0x54: {  // RecordJumpOnHorse (DVElementActorPC::Translate 0x54): the leap, from where he is
+        DVOrder o;
+        o.id = DVOrder::NewID();
+        o.command = CMD_JUMP_HORSE;
+        o.target = e->target;
+        seq.push_back(o);
+        break;
+    }
     case 0x34:  // RecordDismountHorse
         if (Horse()) {
             DVOrder o;
@@ -169,6 +177,8 @@ void DVElementActor::Instruct(DVSequenceElement* e) {
     if (DVSequenceManager::trace)
         SBLog("  %s #%d instruct cmd 0x%x: %zu orders (at %.0f,%.0f layer %u)", KindName(), DVScript::Handle(this), e->command,
               seq.size(), pos.posMap.x, pos.posMap.y, pos.layer);
+    if (DVSequenceManager::trace && getenv("DVORDERS"))
+        for (const DVOrder& o : seq) SBLog("     %s order 0x%x to %.0f,%.0f", KindName(), o.command, o.goal.x, o.goal.y);
     if (seq.empty()) {
         e->SetState(SEQ_DONE);
         return;

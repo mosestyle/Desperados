@@ -1,4 +1,5 @@
 #include "dv/DVEngine.h"
+#include <cstdlib>
 #include "dv/DVMobile.h"
 #include "dv/DVPatch.h"
 
@@ -118,6 +119,7 @@ bool DVEngine::LoadStateFromFile(const std::string& name) {
         }
         case 0x43415254: done = LoadMobileElementsFromFile(f); break;       // CART
         case 0x50415420: done = grid->LoadPatchesFromFile(f); break;          // PAT
+        case 0x4d415420: done = grid->LoadMaterialSectorsFromFile(f); break;  // MAT
         default: break;  // the others come with the next steps
         }
         if (done >= 0 && (uint32_t)done != len)
@@ -464,9 +466,12 @@ void DVEngine::PerformHourglass() {
     // DVLinePatch lines): on as he comes in, off when the last one has left
     for (const auto& p : grid->Patches()) {
         if (!p->zone || !p->trigger) continue;
+        static const bool off = getenv("DVNOTRIGGER") != nullptr;
+        if (off) continue;
         for (DVElementActor* h : heroes) {
-            bool in = h->active && h->sprite->pos.layer == p->layer && p->zone->box.IsInside_p(h->sprite->pos.posMap) &&
-                      p->zone->polygon.IsInside_p(h->sprite->pos.posMap);
+            // (as the script zones: only on its layer, see DVScript::CheckZones)
+            if (!h->active || h->sprite->pos.layer != p->layer) continue;
+            bool in = p->zone->box.IsInside_p(h->sprite->pos.posMap) && p->zone->polygon.IsInside_p(h->sprite->pos.posMap);
             bool was = std::find(p->inside.begin(), p->inside.end(), h) != p->inside.end();
             if (in && !was) {
                 p->Enter(h);

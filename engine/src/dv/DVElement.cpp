@@ -779,6 +779,37 @@ bool DVElementActor::StepOrders() {
         if (h) CopyPositionFrom(h);
         break;
     }
+    case CMD_JUMP_HORSE: {
+        // DVElementActorPC::Execute 0x77 / PerformHorseJump: the leap from where he is down into
+        // the saddle, along the jump's animation; then he sits on the horse (posture 1)
+        auto* h = dynamic_cast<DVElementActor*>(o.target);
+        if (first) {
+            if (!h || !canRide || (h->rider && h->rider != this) || h->dead) {
+                r = 4;
+                break;
+            }
+            h->Stop();
+            o.goal = pos.posMap;  // (where he leaps from)
+            o.tolerance = 0;
+            SBGeoVector2D d = h->sprite->pos.posMap - pos.posMap;
+            if (d.x != 0.0f || d.y != 0.0f) pos.direction = pos.directionWanted = (uint16_t)(SBGetSector0to15(d, 1.0f) & 0xf);
+        }
+        if (!h) {
+            r = 4;
+            break;
+        }
+        r = s->HasAnimation(CMD_JUMP_HORSE) ? s->PerformAction(o.id, CMD_JUMP_HORSE, 0, false) : 3;
+        o.tolerance += 1.0f;
+        float t = std::min(1.0f, o.tolerance / 18.0f);
+        SBGeoPoint2D to = h->sprite->pos.posMap;
+        pos.SetPositionMap(o.goal + (to - o.goal) * t);
+        pos.ComputePositionAll();
+        if (r == 3 || r == 4) {
+            SitOnHorse(h);
+            r = 3;
+        }
+        break;
+    }
     case CMD_DISMOUNT: {
         // DVElementActorHuman::Execute 0x14: down, beside the horse
         DVElementActor* h = Horse();
@@ -1337,7 +1368,30 @@ bool DVElementActor::SeesPoint(const SBGeoPoint3D& p, bool range) const {
 // night's lights come with the night missions)
 float DVElementActor::ViewRadius(const SBGeoPoint3D& eyes) const {
     float r2 = (float)((int)view.length * (int)view.length) - eyes.z * eyes.z;
-    return r2 > 0.0f ? std::sqrt(r2) : 0.0f;
+    float r = r2 > 0.0f ? std::sqrt(r2) : 0.0f;
+    // DVElementActorNPC::ComputeViewRadius at night: half as far, unless a lit zone he can see
+    // is near the middle or the sides of his view (up to the whole length within 10 pixels)
+    DVEngine* e = DVEngine::mpEngine;
+    DVFastFindGrid* grid = sprite ? sprite->grid : nullptr;
+    if (!e || !e->night || !grid || r <= 0.0f) return r;
+    float h = r * 0.5f;
+    SBGeoPoint2D base(eyes.x, eyes.y);
+    SBGeoPoint2D mid = base + SBGeoVector2D(view.dir.x, view.dir.y * 0.57357645f) * h;
+    SBGeoPoint2D left = base + view.edgeL * h, right = base + view.edgeR * h;
+    uint16_t layer = sprite->pos.layer;
+    float best = 0.5f;
+    auto factor = [](const SBGeoPoint2D& a, const SBGeoPoint2D& b) {
+        float d = std::sqrt((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y));
+        return d < 10.0f ? 1.0f : d > 110.0f ? 0.5f : 1.05f - d * 0.005f;
+    };
+    for (const auto& l : grid->Lights()) {
+        if (l.layer != layer || std::fabs(l.center.x - mid.x) > 400.0f || std::fabs(l.center.y - mid.y) > 400.0f) continue;
+        float f = std::max(factor(l.center, mid), std::max(factor(l.center, left), factor(l.center, right)));
+        if (f <= best) continue;
+        if (!grid->IsReachable(eyes, l.point, true)) continue;
+        best = f;
+    }
+    return r * best;
 }
 
 // the hero's current command scales how fast he is noticed (running x4, walking x2, crawling

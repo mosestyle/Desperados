@@ -1668,14 +1668,19 @@ void DVScript::CheckZones(DVElementActor* a, bool silent) {
     const DVPositionInterface& pos = a->sprite->pos;
     for (auto& o : locations) {
         if (!o || o->type != 2) continue;
-        bool in = a->active && pos.layer == o->layer && o->zone->box.IsInside_p(pos.posMap) &&
-                  o->zone->polygon.IsInside_p(pos.posMap);
+        // the original notices a zone when one crosses its lines, which are on its layer: on
+        // another layer (up a ladder, inside a house) one stays where one was
+        if (!a->active || pos.layer != o->layer) continue;
+        bool in = o->zone->box.IsInside_p(pos.posMap) && o->zone->polygon.IsInside_p(pos.posMap);
         auto it = std::find(o->occupants.begin(), o->occupants.end(), a);
         bool was = it != o->occupants.end();
         if (in == was) continue;
         if (in) o->occupants.push_back(a);
         else o->occupants.erase(it);
         if (silent || !o->hasScript || !o->inst) continue;
+        if (DVSequenceManager::trace)
+            SBLog("  %s #%d %s %s at %.0f,%.0f", a->KindName(), Handle(a), in ? "enters" : "leaves", o->inst->cls->name.c_str(),
+                  a->sprite->pos.posMap.x, a->sprite->pos.posMap.y);
         CallFor(o->inst.get(), a, in ? "EnterZone" : "ExitZone", {Handle(a)});
     }
 }

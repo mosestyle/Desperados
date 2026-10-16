@@ -101,6 +101,15 @@ public:
     DVDoor* NearestDoor(const SBGeoPoint2D& p, float maxDist) const;
     void AddLayerSector(DVSector* s, uint16_t layer);
     void AdoptSector(DVSector* s);  // the grid owns it, and lists it by its number
+    // ---- the lit zones of the night missions (MAT hunk, material 8: DVSectorShadow, 0x4000) ------
+    struct Light {
+        SBGeoPoint2D center;  // +0x58
+        SBGeoPoint3D point;   // +0x60: the light, in 3D
+        float radius = 0;     // +0x54
+        uint16_t layer = 0;   // +0x50
+    };
+    int LoadMaterialSectorsFromFile(SBFile& f);  // 0x082afb40
+    const std::vector<Light>& Lights() const { return lights; }
     // ---- patches (PAT, DVEngine::LoadPatchFromFile 0x0826b810; +0x1e4) -----------------------
     int LoadPatchesFromFile(SBFile& f);
     class DVPatch* Patch(unsigned i) const { return i < patches.size() ? patches[i].get() : nullptr; }
@@ -133,6 +142,7 @@ private:
     std::vector<std::unique_ptr<DVSightObstacle>> ownObstacles;
     std::vector<std::unique_ptr<DVMask>> ownMasks;
     std::vector<std::unique_ptr<class DVPatch>> patches;
+    std::vector<Light> lights;
     void EnsureCells();
 };
 

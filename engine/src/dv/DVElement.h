@@ -138,6 +138,7 @@ enum : uint32_t {
     CMD_RIDE_SHOOT = 0x11,     // a shot from the saddle
     CMD_RIDE_WALK = 0x12, CMD_RIDE_GALLOP = 0x13,
     CMD_DISMOUNT = 0x14,
+    CMD_JUMP_HORSE = 0x77,     // Cooper's leap into the saddle (from a balcony, a roof)
     CMD_TAKE_BODY = 0x29,      // picking a body up
     CMD_CARRY = 0x2a,          // walking with it
     CMD_DROP_BODY = 0x2b,      // putting it down

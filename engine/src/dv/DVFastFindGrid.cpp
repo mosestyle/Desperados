@@ -1,4 +1,5 @@
 #include "dv/DVFastFindGrid.h"
+#include <cmath>
 #include "dv/DVMobile.h"
 #include "dv/DVPatch.h"
 #include "dv/DVEngine.h"
@@ -662,6 +663,54 @@ int DVFastFindGrid::LoadPatchesFromFile(SBFile& f) {
         auto* p = new DVPatch();
         patches.emplace_back(p);
         r += p->LoadFromFile(f, *this);
+    }
+    return r;
+}
+
+// DVFastFindGrid::LoadMaterialSectorsFromFile (0x082afb40): for the ground and each sight
+// obstacle, its material zones (the sound of the steps) and, material 8, the lit zones that
+// let the guards see far at night (DVSectorShadow::Initialize: the centre, the light's point in
+// 3D on what it stands on, the mean radius)
+int DVFastFindGrid::LoadMaterialSectorsFromFile(SBFile& f) {
+    f.version = f.U32();
+    if (f.version != 4)
+        SBError(true, "DVFastFindGrid.cpp", 0x7cd, "Version Check Failed on %s (file version %u, expected version %u).",
+                "Hunk material zones", f.version, 4);
+    uint16_t n = f.U16();
+    int r = 6;
+    for (uint16_t i = 0; i < n; ++i) {
+        f.U16();  // the sight obstacle (0xffff: the ground)
+        uint16_t k = f.U16();
+        r += 4;
+        for (uint16_t j = 0; j < k; ++j) {
+            uint8_t material = f.U8();
+            DVSector s;
+            if (material == 8) {
+                uint16_t layer = f.U16();
+                r += 3 + s.LoadFromFile(f);
+                Light l;
+                l.layer = layer;
+                size_t m = s.polygon.pts.size();
+                for (const auto& p : s.polygon.pts) l.center = l.center + SBGeoVector2D(p.x, p.y);
+                if (m) l.center = SBGeoPoint2D(l.center.x / (float)m, l.center.y / (float)m);
+                float z = 0;
+                for (DVSightObstacle* o : viewAreas)
+                    if (o && o->motionLayer == (int32_t)layer && o->box.IsInside_p(l.center) && o->polygon.IsInside_p(l.center)) {
+                        z = (o->plane.zx * l.center.x + o->plane.zy * l.center.y + o->plane.zc) / (1.0f - o->plane.zy);
+                        break;
+                    }
+                l.point = SBGeoPoint3D(l.center.x, l.center.y + z, z);
+                for (const auto& p : s.polygon.pts) l.radius += std::sqrt((p.x - l.center.x) * (p.x - l.center.x) + (p.y - l.center.y) * (p.y - l.center.y));
+                if (m) l.radius /= (float)m;
+                lights.push_back(l);
+            } else {
+                f.U32();
+                f.U32();
+                f.U8();
+                f.U32();
+                r += 0xe + s.LoadFromFile(f);
+            }
+        }
     }
     return r;
 }
