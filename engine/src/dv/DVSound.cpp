@@ -8,7 +8,12 @@
 #include "sb/SBFile.h"
 #include "sb/SBSound.h"
 
-extern int desprand();
+// the sound's own random numbers (the game's are kept for the game: a saved game is replayed)
+static unsigned gSoundRand = 12345;
+static int SoundRand() {
+    gSoundRand = gSoundRand * 1103515245u + 12345u;
+    return (int)((gSoundRand >> 16) & 0x7fff);
+}
 
 DVSound* DVSound::mpSound = nullptr;
 
@@ -186,7 +191,7 @@ void DVSound::PlayFx(uint16_t id, const SBGeoPoint2D& at, uint8_t material) {
     pan *= 0.8f;
     size_t k = 0;
     if (fx.type == 0) k = std::min<size_t>(material, fx.files.size() - 1);
-    else if (fx.type == 1) k = (size_t)(desprand() % (int)fx.files.size());
+    else if (fx.type == 1) k = (size_t)(SoundRand() % (int)fx.files.size());
     SBSound::Play(fx.files[k], vol, pan, false);
 }
 
@@ -255,7 +260,7 @@ void DVSound::Hourglass(const SBGeoPoint2D& l, int mood) {
             // now and then: after a wait between the two delays (tenths of a second)
             if (--s.wait > 0) continue;
             int span = std::max(1, (int)s.maxDelay - (int)s.minDelay);
-            s.wait = ((int)s.minDelay + desprand() % span) * 25 / 10 + 1;
+            s.wait = ((int)s.minDelay + SoundRand() % span) * 25 / 10 + 1;
             if (vol >= 0.02f) SBSound::Play(s.file, vol, pan, false);
             continue;
         }
@@ -274,12 +279,12 @@ void DVSound::Hourglass(const SBGeoPoint2D& l, int mood) {
     if (music[mood].empty()) return;
     if (mood != musicMood) {
         musicMood = mood;
-        musicNext = (unsigned)(desprand() % (int)music[mood].size());
+        musicNext = (unsigned)(SoundRand() % (int)music[mood].size());
         SBSound::QueueMusic(music[mood][musicNext % music[mood].size()]);
         return;
     }
     if (SBSound::MusicWantsNext()) {
-        musicNext = (musicNext + 1 + (unsigned)(desprand() % 2)) % (unsigned)music[mood].size();
+        musicNext = (musicNext + 1 + (unsigned)(SoundRand() % 2)) % (unsigned)music[mood].size();
         SBSound::QueueMusic(music[mood][musicNext]);
     }
 }

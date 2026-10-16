@@ -20,6 +20,7 @@ struct SBSound {
     static void (*setVolumes)(float fx, float music, float voice);
 
     // ---- the engine's side: game paths ----------------------------------------------------------
+    static bool muted;  // (a saved game played again in a moment: nothing is heard)
     static void PlayVoice(const std::string& gamePath);
     static void StopVoice();
     static int Play(const std::string& gamePath, float vol, float pan, bool loop);

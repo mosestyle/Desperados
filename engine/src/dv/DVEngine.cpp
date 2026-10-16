@@ -1,5 +1,9 @@
 #include "dv/DVEngine.h"
+#include "sb/SBSound.h"
+extern void despsrand(unsigned seed);
 #include <cstdlib>
+#include <cstdio>
+#include <ctime>
 #include "dv/DVMobile.h"
 #include "dv/DVPatch.h"
 #include "dv/DVSound.h"
@@ -86,6 +90,9 @@ static uint32_t tag4(const uint8_t* t) { return (uint32_t)t[0] << 24 | t[1] << 1
 // DVEngine::LoadStateFromFile (0x08269a30)
 bool DVEngine::LoadStateFromFile(const std::string& name) {
     levelName = name;
+    // the random numbers start the same way for each mission (a saved game is played again)
+    std::srand(1);
+    despsrand(0x5eed);
     SBFile f;
     std::string path = std::string(kDirLevels) + "\\" + name + ".dvd";
     if (f.Open(path, 1) != 0) {
@@ -423,6 +430,7 @@ void DVEngine::ClampCamera() {
 // step (heroes' orders, scenery animations), then the display order again
 void DVArtificialIntelligenceTick();
 void DVEngine::PerformHourglass() {
+    while (replayAt < replayQueue.size() && (int)replayQueue[replayAt].tick <= ticks) Apply(replayQueue[replayAt++]);
     ++ticks;
     if (dialogue) dialogue->Refresh();
     // the scripts: StartUp's HourGlass each second, CheckVictoryCondition every third
@@ -645,7 +653,136 @@ void DVEngine::StateSelectActor(uint16_t kind) {
 
 // the intro skipped: the game runs at once to its end (the original loads the state saved after
 // it, Data\Levels\Briefing\..., ISetSkipData)
+void DVEngine::Record(uint8_t op, int32_t a, float x, float y) {
+    if (replaying) return;
+    Command c;
+    c.tick = (uint32_t)ticks;
+    c.op = op;
+    c.a = a;
+    c.x = x;
+    c.y = y;
+    journal.push_back(c);
+}
+
+void DVEngine::PlayerSelect(DVElementActor* h) {
+    Record(CMD_SELECT, h ? (int32_t)(std::find(heroes.begin(), heroes.end(), h) - heroes.begin()) : -1);
+    Select(h);
+}
+
+void DVEngine::PlayerSkipLine() {
+    Record(CMD_SKIP_LINE);
+    if (dialogue) dialogue->Skip();
+}
+
+void DVEngine::Apply(const Command& c) {
+    auto actor = [&](int32_t h) { return dynamic_cast<DVElementActor*>(DVScript::Element(h)); };
+    switch (c.op) {
+    case CMD_SELECT: PlayerSelect(c.a >= 0 && (size_t)c.a < heroes.size() ? heroes[(size_t)c.a] : nullptr); break;
+    case CMD_MOVE: OrderMove(SBGeoPoint2D(c.x, c.y), c.a != 0); break;
+    case CMD_SHOOT: OrderShoot(DVScript::Element(c.a)); break;
+    case CMD_CROUCH: OrderCrouch(); break;
+    case CMD_MOUNT: OrderMount(actor(c.a)); break;
+    case CMD_TAKE: OrderTakeBody(actor(c.a)); break;
+    case CMD_RELOAD: OrderReload(); break;
+    case CMD_RUN: OrderMakeRunning(); break;
+    case CMD_STOP: OrderStop(); break;
+    case CMD_SKIP_BRIEFING: SkipBriefing(); break;
+    case CMD_SKIP_LINE: PlayerSkipLine(); break;
+    default: break;
+    }
+}
+
+static const uint32_t kSaveMagic = 0x56534544;  // "DESV"
+
+bool DVEngine::SaveGame(const std::string& path, const std::string& title) const {
+    FILE* f = fopen(path.c_str(), "wb");
+    if (!f) return false;
+    auto u32 = [&](uint32_t v) { fwrite(&v, 4, 1, f); };
+    auto str = [&](const std::string& s) { u32((uint32_t)s.size()); fwrite(s.data(), 1, s.size(), f); };
+    u32(kSaveMagic);
+    u32(1);
+    str(levelName);
+    str(title);
+    int64_t when = (int64_t)time(nullptr);
+    fwrite(&when, 8, 1, f);
+    u32((uint32_t)ticks);
+    fwrite(&camera.x, 4, 1, f);
+    fwrite(&camera.y, 4, 1, f);
+    u32((uint32_t)journal.size());
+    for (const Command& c : journal) {
+        u32(c.tick);
+        fwrite(&c.op, 1, 1, f);
+        fwrite(&c.a, 4, 1, f);
+        fwrite(&c.x, 4, 1, f);
+        fwrite(&c.y, 4, 1, f);
+    }
+    bool ok = ferror(f) == 0;
+    ok = fclose(f) == 0 && ok;
+    return ok;
+}
+
+bool DVEngine::ReadSave(const std::string& path, SaveInfo& out) {
+    FILE* f = fopen(path.c_str(), "rb");
+    if (!f) return false;
+    bool ok = true;
+    auto u32 = [&]() { uint32_t v = 0; ok = ok && fread(&v, 4, 1, f) == 1; return v; };
+    auto str = [&]() {
+        uint32_t n = u32();
+        std::string s;
+        if (!ok || n > 4096) { ok = false; return s; }
+        s.resize(n);
+        if (n) ok = ok && fread(&s[0], 1, n, f) == n;
+        return s;
+    };
+    if (u32() != kSaveMagic || u32() != 1) ok = false;
+    if (ok) out.level = str();
+    if (ok) out.title = str();
+    if (ok) ok = fread(&out.when, 8, 1, f) == 1;
+    if (ok) out.ticks = u32();
+    if (ok) ok = fread(&out.camX, 4, 1, f) == 1 && fread(&out.camY, 4, 1, f) == 1;
+    uint32_t n = ok ? u32() : 0;
+    if (n > 10000000) ok = false;
+    out.journal.clear();
+    for (uint32_t i = 0; ok && i < n; ++i) {
+        Command c;
+        c.tick = u32();
+        ok = ok && fread(&c.op, 1, 1, f) == 1 && fread(&c.a, 4, 1, f) == 1 && fread(&c.x, 4, 1, f) == 1 &&
+             fread(&c.y, 4, 1, f) == 1;
+        out.journal.push_back(c);
+    }
+    fclose(f);
+    return ok;
+}
+
+void DVEngine::StartReplay(const SaveInfo& s) {
+    replayQueue = s.journal;
+    replayAt = 0;
+    replayUntil = s.ticks;
+    replayCamera = SBGeoPoint2D(s.camX, s.camY);
+    journal.clear();
+}
+
+void DVEngine::ReplaySome(int steps) {
+    bool was = SBSound::muted;
+    SBSound::muted = true;
+    while (steps-- > 0 && Replaying() && missionResult == 0 && !missionFailed) PerformHourglass();
+    SBSound::muted = was;
+    if (!Replaying()) {
+        // what the player did after the last step before saving
+        while (replayAt < replayQueue.size()) Apply(replayQueue[replayAt++]);
+        if (replayCamera.x >= 0) {
+            camera = replayCamera;
+            cameraMoved = true;
+            replayCamera = SBGeoPoint2D(-1, -1);
+        }
+        replayQueue.clear();
+        replayAt = 0;
+        replayUntil = 0;
+    }
+}
+
 void DVEngine::SkipBriefing() {
+    Record(CMD_SKIP_BRIEFING);
     if (!briefing) return;
     fast = true;
     if (dialogue) {
@@ -727,12 +864,14 @@ DVElement* DVEngine::ShootableTargetAt(const SBGeoPoint2D& p, float slack) const
 void DVEngine::ToggleWatched(DVElementActor* n) { watched = watched == n ? nullptr : n; }
 
 bool DVEngine::OrderShoot(DVElement* target) {
+    Record(CMD_SHOOT, DVScript::Handle(target));
     if (!selected || missionFailed) return false;
     if (userLocked || missionResult) return false;
     return selected->OrderShoot(target);
 }
 
 void DVEngine::OrderReload() {
+    Record(CMD_RELOAD);
     if (selected && !missionFailed) selected->Reload();
 }
 
@@ -779,6 +918,7 @@ void DVEngine::HeroDied(DVElementActor* hero) {
 }
 
 bool DVEngine::OrderMove(const SBGeoPoint2D& p, bool run) {
+    Record(CMD_MOVE, run ? 1 : 0, p.x, p.y);
     if (!selected || selected->dead || missionFailed) return false;
     if (userLocked || missionResult) return false;
     return selected->MoveTo(p, run);
@@ -802,6 +942,7 @@ DVElementActor* DVEngine::HorseAt(const SBGeoPoint2D& p, float slack) const {
 
 // DVElementActorHorse::MouseClicked: the selected hero goes to the horse and gets on it
 bool DVEngine::OrderMount(DVElementActor* h) {
+    Record(CMD_MOUNT, DVScript::Handle(h));
     if (!selected || selected->dead || missionFailed || userLocked || missionResult || !h) return false;
     if (selected->Horse()) return false;
     std::deque<DVOrder> seq;
@@ -811,6 +952,7 @@ bool DVEngine::OrderMount(DVElementActor* h) {
 }
 
 bool DVEngine::OrderTakeBody(DVElementActor* b) {
+    Record(CMD_TAKE, DVScript::Handle(b));
     if (!selected || selected->dead || missionFailed || userLocked || missionResult || !b) return false;
     std::deque<DVOrder> seq;
     if (!selected->BuildTakeBody(b, seq)) return false;
@@ -819,10 +961,12 @@ bool DVEngine::OrderTakeBody(DVElementActor* b) {
 }
 
 void DVEngine::OrderMakeRunning() {
+    Record(CMD_RUN);
     if (selected) selected->MakeRunning();
 }
 
 void DVEngine::OrderCrouch() {
+    Record(CMD_CROUCH);
     if (!selected || selected->dead || missionFailed || userLocked) return;
     if (selected->Horse()) {
         selected->OrderDismount();
@@ -837,6 +981,7 @@ void DVEngine::OrderCrouch() {
 }
 
 void DVEngine::OrderStop() {
+    Record(CMD_STOP);
     if (selected) selected->Stop();
 }
 

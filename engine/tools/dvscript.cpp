@@ -221,7 +221,43 @@ int main(int argc, char** argv) {
     size_t lastSentences = 0;
     bool lastBriefing = false, lastLocked = false;
     int frame = 0;
+    // DVLOAD=save: the saved game played again first; DVSAVEAT=tick,path: saved at that tick
+    if (const char* ld = getenv("DVLOAD")) {
+        DVEngine::SaveInfo si;
+        if (!DVEngine::ReadSave(ld, si)) {
+            fprintf(stderr, "can't read %s\n", ld);
+            return 1;
+        }
+        fprintf(stderr, "replaying %s: %zu commands, %u steps\n", si.title.c_str(), si.journal.size(), si.ticks);
+        engine.StartReplay(si);
+        while (engine.Replaying()) engine.ReplaySome(250);
+        fprintf(stderr, "replayed to step %d\n", engine.ticks);
+    }
+    auto stateHash = [&]() {
+        uint64_t h = 1469598103934665603ull;
+        auto mix = [&](uint64_t v) { h = (h ^ v) * 1099511628211ull; };
+        mix((uint64_t)engine.ticks);
+        for (DVElementActor* a : engine.Characters()) {
+            mix((uint64_t)(int64_t)(a->sprite->pos.posMap.x * 16));
+            mix((uint64_t)(int64_t)(a->sprite->pos.posMap.y * 16));
+            mix((uint64_t)a->life);
+            mix((uint64_t)a->active);
+            if (a->ai) mix((uint64_t)a->ai->state * 256 + a->ai->alertStatus);
+        }
+        return h;
+    };
+    int saveAt = -1;
+    char savePath[512] = "";
+    if (const char* sv = getenv("DVSAVEAT")) sscanf(sv, "%d,%511s", &saveAt, savePath);
+    int saveLoop = -1;  // DVSAVET=loop-second,path
+    if (const char* sv = getenv("DVSAVET")) sscanf(sv, "%d,%511s", &saveLoop, savePath);
+    if (saveLoop >= 0) saveLoop *= 25;
     for (int t = 0; t <= seconds * 25; ++t) {
+        if (saveLoop >= 0 && t == saveLoop) saveAt = engine.ticks;
+        if (engine.ticks == saveAt) {
+            fprintf(stderr, "saved at step %d: %s, state %016llx\n", engine.ticks,
+                    engine.SaveGame(savePath, "test") ? "ok" : "FAILED", (unsigned long long)stateHash());
+        }
         if (t == 1 && getenv("DVSKIP") && engine.briefing) {
             fprintf(stderr, "t %d: skipping the intro\n", t);
             engine.SkipBriefing();
@@ -273,6 +309,8 @@ int main(int argc, char** argv) {
             }
         }
         engine.PerformHourglass();
+        if (getenv("DVHASH") && engine.ticks % atoi(getenv("DVHASH")) == 0)
+            fprintf(stderr, "step %d: state %016llx\n", engine.ticks, (unsigned long long)stateHash());
         if (const char* cam = getenv("DVCAM")) {
             float cx = 0, cy = 0;
             if (sscanf(cam, "%f,%f", &cx, &cy) == 2) engine.camera = SBGeoPoint2D(cx, cy) - engine.screen * 0.5f;

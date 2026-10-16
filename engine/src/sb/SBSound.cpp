@@ -23,8 +23,10 @@ static const std::string& Real(const std::string& gamePath) {
     return known[gamePath] = SBFile::Resolve(gamePath);
 }
 
+bool SBSound::muted = false;
+
 void SBSound::PlayVoice(const std::string& gamePath) {
-    if (!playVoice) return;
+    if (!playVoice || muted) return;
     std::string real = SBFile::Resolve(gamePath);
     if (!real.empty()) playVoice(real);
 }
@@ -34,7 +36,7 @@ void SBSound::StopVoice() {
 }
 
 int SBSound::Play(const std::string& gamePath, float vol, float pan, bool loop) {
-    if (!mixPlay) return -1;
+    if (!mixPlay || muted) return -1;
     const std::string& real = Real(gamePath);
     if (real.empty()) return -1;
     return mixPlay(real, vol, pan, loop);
@@ -51,7 +53,7 @@ void SBSound::Stop(int ch) {
 bool SBSound::Playing(int ch) { return mixPlaying && ch >= 0 && mixPlaying(ch); }
 
 void SBSound::QueueMusic(const std::string& gamePath) {
-    if (!musicQueue) return;
+    if (!musicQueue || muted) return;
     const std::string& real = Real(gamePath);
     if (!real.empty()) musicQueue(real);
 }

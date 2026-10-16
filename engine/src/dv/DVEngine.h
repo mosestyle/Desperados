@@ -73,6 +73,42 @@ public:
     const std::vector<DVElementActor*>& Heroes() const { return heroes; }
     DVElementActor* Selected() const { return selected; }
     void Select(DVElementActor* hero);
+    // ---- the player's commands, kept to save the game (DVEngine::journal) --------------------
+    // A saved game is the mission and what the player did, tick by tick: the engine gives the same
+    // game again when it does it again (its random numbers start the same way each mission).
+    struct Command {
+        uint32_t tick = 0;
+        uint8_t op = 0;
+        int32_t a = 0;
+        float x = 0, y = 0;
+    };
+    enum : uint8_t { CMD_SELECT = 1, CMD_MOVE, CMD_SHOOT, CMD_CROUCH, CMD_MOUNT, CMD_TAKE, CMD_RELOAD, CMD_RUN, CMD_STOP,
+                     CMD_SKIP_BRIEFING, CMD_SKIP_LINE, CMD_DROP };
+    std::vector<Command> journal;
+    bool replaying = false;
+    void Record(uint8_t op, int32_t a = 0, float x = 0, float y = 0);
+    void Apply(const Command& c);
+    void PlayerSelect(DVElementActor* hero);   // Select, kept in the journal
+    void PlayerSkipLine();                      // the dialogue's next line
+    // a saved game: the level and the journal up to now (Data\..\saves\*.sav)
+    bool SaveGame(const std::string& path, const std::string& title) const;
+    struct SaveInfo {
+        std::string level, title;
+        uint32_t ticks = 0;
+        int64_t when = 0;
+        float camX = -1, camY = -1;
+        std::vector<Command> journal;
+    };
+    static bool ReadSave(const std::string& path, SaveInfo& out);
+    // after LoadStateFromFile: the journal again, step by step, up to its tick (progress 0..1)
+    void StartReplay(const SaveInfo& s);
+    bool Replaying() const { return replayAt < replayQueue.size() || (int)replayUntil > ticks; }
+    void ReplaySome(int steps);   // a few steps of it (the app shows its progress meanwhile)
+    float ReplayProgress() const { return replayUntil ? (float)ticks / (float)replayUntil : 1.0f; }
+    std::vector<Command> replayQueue;
+    size_t replayAt = 0;
+    uint32_t replayUntil = 0;
+    SBGeoPoint2D replayCamera = SBGeoPoint2D(-1, -1);
     void SelectNextPlayable();   // the selected hero can't be used any more: the next one
     // the hero under a map point (DVElementActorPC::IsFocusable), the front-most one
     DVElementActor* HeroAt(const SBGeoPoint2D& p, float slack) const;

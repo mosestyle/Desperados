@@ -10,9 +10,12 @@
 #include "dv/DVEngine.h"
 #include "sb/SBFile.h"
 #include "sb/SBPicture.h"
+#include "stb_image.h"
+
+#include <cstdio>
 
 // RGB565 pixels -> RGBA, the colour key transparent
-static GLuint MakeTexture(const std::vector<uint16_t>& px, int w, int h, uint16_t key) {
+static GLuint MakeTexture(const std::vector<uint16_t>& px, int w, int h, uint16_t key, uint16_t glass = 0xffff) {
     std::vector<uint8_t> rgba((size_t)w * h * 4);
     for (size_t i = 0; i < px.size() && i < (size_t)w * h; ++i) {
         uint16_t c = px[i];
@@ -20,6 +23,13 @@ static GLuint MakeTexture(const std::vector<uint16_t>& px, int w, int h, uint16_
         rgba[i * 4 + 1] = (uint8_t)((c >> 5 & 63) * 255 / 63);
         rgba[i * 4 + 2] = (uint8_t)((c & 31) * 255 / 31);
         rgba[i * 4 + 3] = c == key ? 0 : 255;
+        if (c == glass && glass != 0xffff) {
+            // the see-through part of the debriefing's plaque
+            rgba[i * 4 + 0] = 30;
+            rgba[i * 4 + 1] = 18;
+            rgba[i * 4 + 2] = 8;
+            rgba[i * 4 + 3] = 170;
+        }
     }
     GLuint t = 0;
     glGenTextures(1, &t);
@@ -46,13 +56,18 @@ bool GameUI::Init() {
     LoadFont(dialog, "Data\\Interface\\Fonts\\dialog.fnt");
     LoadFont(tips, "Data\\Interface\\Fonts\\tips.fnt");
     LoadFont(title, "Data\\Interface\\Fonts\\title.fnt");
+    LoadFont(buttons, "Data\\Interface\\Fonts\\buttons_1.fnt");
+    LoadFont(list, "Data\\Interface\\Fonts\\list_0.fnt");
     std::string lang = DVDialogue::mpTexts ? DVDialogue::mpTexts->language : "english";
     if (!res.Load(lang)) SBLog("default.res not found: no portraits");
     return dialog.ok;
 }
 
 void GameUI::Shutdown() {
-    for (Font* f : {&dialog, &tips, &title})
+    for (auto& p : files)
+        if (p.second.tex) glDeleteTextures(1, &p.second.tex);
+    files.clear();
+    for (Font* f : {&dialog, &tips, &title, &buttons, &list})
         if (f->tex) glDeleteTextures(1, &f->tex);
     for (auto& p : pics)
         if (p.second.tex) glDeleteTextures(1, &p.second.tex);
@@ -74,13 +89,78 @@ const GameUI::Pic* GameUI::Picture(uint32_t id, uint32_t entry) {
     return p.tex ? &pics[k] : nullptr;
 }
 
+const GameUI::Pic* GameUI::FilePicture(const std::string& path, uint16_t key) {
+    auto it = files.find(path);
+    if (it != files.end()) return it->second.tex ? &it->second : nullptr;
+    Pic p;
+    SBPictureSixteen pic;
+    if (pic.LoadFromFile(path) && pic.GetWidth() > 0) {
+        p.w = pic.GetWidth();
+        p.h = pic.GetHeight();
+        p.tex = MakeTexture(pic.Pixels(), p.w, p.h, key, path.find("Debriefing") != std::string::npos ? 0x001f : 0xffff);
+    } else {
+        SBLog("picture %s not found", path.c_str());
+    }
+    files[path] = p;
+    return p.tex ? &files[path] : nullptr;
+}
+
+const GameUI::Pic* GameUI::PngPicture(const std::string& path) {
+    auto it = files.find(path);
+    if (it != files.end()) return it->second.tex ? &it->second : nullptr;
+    Pic p;
+    std::vector<unsigned char> buf;
+    if (FILE* f = fopen(path.c_str(), "rb")) {
+        fseek(f, 0, SEEK_END);
+        long n = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        if (n > 0) {
+            buf.resize((size_t)n);
+            if (fread(buf.data(), 1, buf.size(), f) != buf.size()) buf.clear();
+        }
+        fclose(f);
+    }
+    int w = 0, h = 0, n = 0;
+    unsigned char* rgba = buf.empty() ? nullptr : stbi_load_from_memory(buf.data(), (int)buf.size(), &w, &h, &n, 4);
+    if (rgba) {
+        glGenTextures(1, &p.tex);
+        glBindTexture(GL_TEXTURE_2D, p.tex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        p.w = w;
+        p.h = h;
+        stbi_image_free(rgba);
+    }
+    files[path] = p;
+    return p.tex ? &files[path] : nullptr;
+}
+
+std::u16string GameUI::U16(const std::string& s) {
+    std::u16string o;
+    for (size_t i = 0; i < s.size();) {
+        unsigned char c = (unsigned char)s[i];
+        uint32_t cp = c;
+        int n = 1;
+        if (c >= 0xf0 && i + 3 < s.size()) cp = (c & 7u) << 18 | (s[i + 1] & 63u) << 12 | (s[i + 2] & 63u) << 6 | (s[i + 3] & 63u), n = 4;
+        else if (c >= 0xe0 && i + 2 < s.size()) cp = (c & 15u) << 12 | (s[i + 1] & 63u) << 6 | (s[i + 2] & 63u), n = 3;
+        else if (c >= 0xc0 && i + 1 < s.size()) cp = (c & 31u) << 6 | (s[i + 1] & 63u), n = 2;
+        o += (char16_t)(cp > 0xffff ? '?' : cp);
+        i += n;
+    }
+    return o;
+}
+
 float GameUI::Scale(int sh) const { return (float)sh / 600.0f; }
 
 float GameUI::TextWidth(const Font& f, const std::u16string& s, float scale) const {
     return f.ok ? (float)f.font.Width(s) * scale : 0.0f;
 }
 
-void GameUI::Text(Overlay& o, const Font& f, const std::u16string& s, float x, float y, float scale, float a) {
+void GameUI::Text(Overlay& o, const Font& f, const std::u16string& s, float x, float y, float scale, float a, float cr,
+                  float cg, float cb) {
     if (!f.ok) return;
     const float W = f.font.PictureWidth(), H = f.font.PictureHeight();
     for (int pass = 0; pass < 2; ++pass) {
@@ -95,7 +175,7 @@ void GameUI::Text(Overlay& o, const Font& f, const std::u16string& s, float x, f
                     if (pass == 0)
                         o.Tex(f.tex, g->x / W, 0, (g->x + g->w) / W, 1, px, py, g->w * scale, H * scale, 0, 0, 0, a * 0.8f);
                     else
-                        o.Tex(f.tex, g->x / W, 0, (g->x + g->w) / W, 1, px, py, g->w * scale, H * scale, 1, 1, 1, a);
+                        o.Tex(f.tex, g->x / W, 0, (g->x + g->w) / W, 1, px, py, g->w * scale, H * scale, cr, cg, cb, a);
                 }
                 px += (g->w + g->after) * scale;
             }
@@ -197,7 +277,7 @@ void GameUI::Draw(Overlay& o, DVEngine* e, int sw, int sh) {
         }
     }
     // the end of the mission
-    if (e->missionResult == 1 || (e->missionResult == 2 && d)) {
+    if (drawEnd && (e->missionResult == 1 || (e->missionResult == 2 && d))) {
         o.Rect(0, sh * 0.3f, (float)sw, sh * 0.4f, 0.05f, 0.04f, 0.02f, 0.82f);
         std::u16string head = e->missionResult == 1 ? u"Mission accomplished" : u"Mission failed";
         const Font& hf = title.ok ? title : dialog;

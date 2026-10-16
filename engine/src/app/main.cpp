@@ -29,6 +29,7 @@
 #include "sb/SBFile.h"
 #include "sb/SBSound.h"
 #include "app/Mixer.h"
+#include "app/Menus.h"
 
 static std::string findGameFolder(int argc, char** argv) {
     std::vector<std::string> tries;
@@ -96,8 +97,12 @@ static bool gAimMode = false;
 static std::vector<UIButton> layoutButtons(DVEngine* engine, int sw, int sh) {
     std::vector<UIButton> b;
     if (!engine) return b;
-    if (engine->missionFailed || engine->missionResult || engine->briefing) return b;
+    if (engine->missionFailed || engine->missionResult) return b;
     float bh = sh * 0.085f, bw = sh * 0.24f, gap = sh * 0.015f;
+    // the pause menu
+    float s = sh / 600.0f;
+    b.push_back({10 * s, 10 * s, 100 * s, 34 * s, 200, "MENU", false});
+    if (engine->briefing) return b;
     float y = sh * 0.16f;
     const auto& heroes = engine->Heroes();
     for (size_t i = 0; i < heroes.size(); ++i) {
@@ -232,13 +237,67 @@ int main(int argc, char** argv) {
         engine->cameraMoved = false;
         levelIndex = i;
         ui.showObjectives = false;
-        if (!uiReady) uiReady = ui.Init() || true;
     };
-    size_t first = 0;
+    if (!uiReady) uiReady = ui.Init() || true;
+    Menus menus;
+    menus.Init(game);
+    auto applyVolumes = [&]() {
+        if (SBSound::setVolumes)
+            SBSound::setVolumes(menus.progress.fx / 10.0f, menus.progress.music / 10.0f, menus.progress.voice / 10.0f);
+    };
+    applyVolumes();
+    menus.Open(Menus::MAIN);
 #ifndef __ANDROID__
-    if (const char* l = getenv("DVLEVEL")) first = (size_t)std::max(0, atoi(l) - 1) % std::max<size_t>(1, levels.size());
+    if (const char* l = getenv("DVLEVEL")) {
+        if (!levels.empty()) loadLevel((size_t)std::max(0, atoi(l) - 1) % levels.size());
+        menus.screen = Menus::NONE;
+    }
 #endif
-    if (!levels.empty()) loadLevel(first);
+    int lastAutoTick = 0;
+    // a mission of the campaign / of the folder
+    auto levelOf = [&](const std::string& name) -> int {
+        for (size_t i = 0; i < levels.size(); ++i)
+            if (levels[i] == name) return (int)i;
+        return -1;
+    };
+    auto startMission = [&](int m) {
+        int li = m >= 0 && m < (int)menus.campaign.size() ? levelOf(menus.campaign[(size_t)m].level) : -1;
+        if (li < 0) return;
+        gAimMode = false;
+        StopVoice();
+        loadLevel((size_t)li);
+        lastAutoTick = 0;
+        menus.screen = Menus::NONE;
+    };
+    auto inMission = [&]() { return engine && !engine->missionFailed && !engine->missionResult && !engine->Replaying(); };
+    auto autosave = [&]() {
+        if (inMission() && menus.screen != Menus::REPLAY) {
+            engine->SaveGame(menus.SlotPath(0), "");
+            lastAutoTick = engine->ticks;
+        }
+    };
+    auto loadSlot = [&](int slot) {
+        DVEngine::SaveInfo si;
+        if (!DVEngine::ReadSave(menus.SlotPath(slot), si)) {
+            menus.message = "Could not read the saved game";
+            menus.messageUntil = SDL_GetTicks() + 2500;
+            return;
+        }
+        int li = levelOf(si.level);
+        if (li < 0) return;
+        gAimMode = false;
+        StopVoice();
+        loadLevel((size_t)li);
+        engine->StartReplay(si);
+        menus.replayProgress = 0;
+        menus.screen = Menus::REPLAY;
+    };
+    auto toMain = [&]() {
+        autosave();
+        engine.reset();
+        MixerStopAll();
+        menus.Open(Menus::MAIN);
+    };
 
     std::vector<Touch> touches;
     bool tapPossible = false;
@@ -247,23 +306,10 @@ int main(int argc, char** argv) {
     // a tap on the map: a hero selects him; the ground orders the selected hero there; a second tap
     // at the same place soon after makes him run (DVEngine::ManageInputProcessLeftDoubleClick)
     auto onTap = [&](const SBGeoPoint2D& mp, float sx, float sy) {
-        if (engine->missionResult == 1) {
-            // the next mission
-            gAimMode = false;
-            StopVoice();
-            loadLevel((levelIndex + 1) % levels.size());
-            return;
-        }
-        if (engine->missionFailed) {
-            // the mission again
-            gAimMode = false;
-            StopVoice();
-            loadLevel(levelIndex);
-            return;
-        }
+        if (engine->missionResult || engine->missionFailed) return;
         // a dialogue in a cut scene: the next line (DVDialogue::ProcessInput)
         if (engine->dialogue && engine->dialogue->Playing() && (engine->briefing || engine->userLocked)) {
-            engine->dialogue->Skip();
+            engine->PlayerSkipLine();
             return;
         }
         if (engine->briefing) return;
@@ -274,7 +320,7 @@ int main(int argc, char** argv) {
             // a hero out cold: Cooper or Sanchez picks him up
             if (carrier && h != sel && h->IsCarriable() && engine->OrderTakeBody(h)) return;
             if (h != engine->Selected()) {
-                engine->Select(h);
+                engine->PlayerSelect(h);
                 return;
             }
         }
@@ -333,8 +379,11 @@ int main(int argc, char** argv) {
                 cam.y = h->sprite->pos.posMap.y - cam.viewH * 0.5f;
                 cam.Stop();
             }
-            engine->Select(h);
+            engine->PlayerSelect(h);
             lastHeroTap = SDL_GetTicks();
+        } else if (b->action == 200) {
+            menus.Open(Menus::PAUSE);
+            autosave();
         } else if (b->action == 100) {
             engine->OrderCrouch();
         } else if (b->action == 101) {
@@ -352,32 +401,93 @@ int main(int argc, char** argv) {
         }
         return true;
     };
+    bool run = true, paused = false;
+    auto menuTap = [&](float x, float y) {
+        Menus::Action a = menus.Tap(x, y, engine.get(), sw, sh);
+        switch (a.act) {
+        case Menus::RESUME: menus.screen = Menus::NONE; break;
+        case Menus::PLAY_MISSION: startMission(a.arg); break;
+        case Menus::LOAD_SLOT: loadSlot(a.arg); break;
+        case Menus::SAVE_SLOT:
+            if (engine) {
+                bool ok = engine->SaveGame(menus.SlotPath(a.arg), "");
+                menus.message = ok ? "Game saved" : "Could not save the game";
+                menus.messageUntil = SDL_GetTicks() + 2000;
+                menus.screen = Menus::NONE;
+            }
+            break;
+        case Menus::RESTART:
+            if (engine) {
+                gAimMode = false;
+                StopVoice();
+                loadLevel(levelIndex);
+                lastAutoTick = 0;
+                menus.screen = Menus::NONE;
+            }
+            break;
+        case Menus::TO_MAIN: toMain(); break;
+        case Menus::QUIT: run = false; break;
+        case Menus::VOLUMES: applyVolumes(); break;
+        case Menus::CONTINUE:
+            if (menus.HasSlot(0)) loadSlot(0);
+            else {
+                menus.mapMission = std::max(0, std::min((int)menus.campaign.size() - 1, menus.progress.unlocked - 1));
+                menus.screen = Menus::MAP;
+            }
+            break;
+        case Menus::NEXT_MISSION: {
+            int m = engine ? menus.MissionOfLevel(engine->levelName) : -1;
+            engine.reset();
+            MixerStopAll();
+            if (m + 1 >= (int)menus.campaign.size()) menus.Open(Menus::THE_END);
+            else {
+                menus.mapMission = m + 1;
+                menus.Open(Menus::MAP);
+            }
+            break;
+        }
+        default: break;
+        }
+    };
+    auto backKey = [&]() {
+        if (menus.screen == Menus::NONE) {
+            if (engine) {
+                menus.Open(Menus::PAUSE);
+                autosave();
+            }
+        } else if (menus.screen == Menus::MAIN) {
+            run = false;
+        } else if (menus.screen == Menus::VICTORY || menus.screen == Menus::FAILED || menus.screen == Menus::REPLAY) {
+        } else {
+            menus.Back(engine != nullptr);
+        }
+    };
     float pinchDist = 0, lastCx = 0, lastCy = 0;
     Uint32 lastMoveT = 0;
     float speedX = 0, speedY = 0;
     double tickAcc = 0;
     Uint64 prev = SDL_GetPerformanceCounter();
-    bool run = true, paused = false;
     while (run) {
         SDL_Event ev;
         while (SDL_PollEvent(&ev)) {
             switch (ev.type) {
             case SDL_QUIT: run = false; break;
-            case SDL_APP_WILLENTERBACKGROUND: paused = true; MixerPause(true); break;
+            case SDL_APP_WILLENTERBACKGROUND:
+                paused = true;
+                MixerPause(true);
+                autosave();
+                break;
             case SDL_APP_DIDENTERFOREGROUND: paused = false; MixerPause(false); prev = SDL_GetPerformanceCounter(); break;
             case SDL_KEYDOWN:
-                if (ev.key.keysym.sym == SDLK_AC_BACK || ev.key.keysym.sym == SDLK_ESCAPE) run = false;
-                if (ev.key.keysym.sym == SDLK_RIGHT && !levels.empty()) loadLevel((levelIndex + 1) % levels.size());
-                if (ev.key.keysym.sym == SDLK_LEFT && !levels.empty()) loadLevel((levelIndex + levels.size() - 1) % levels.size());
+                if (ev.key.keysym.sym == SDLK_AC_BACK || ev.key.keysym.sym == SDLK_ESCAPE) backKey();
+                if (ev.key.keysym.sym == SDLK_RIGHT && !levels.empty() && engine) loadLevel((levelIndex + 1) % levels.size()), menus.screen = Menus::NONE;
+                if (ev.key.keysym.sym == SDLK_LEFT && !levels.empty() && engine) loadLevel((levelIndex + levels.size() - 1) % levels.size()), menus.screen = Menus::NONE;
                 if (ev.key.keysym.sym == SDLK_CAPSLOCK && engine) engine->silhouettes = !engine->silhouettes;
                 break;
             case SDL_FINGERDOWN: {
                 float x = ev.tfinger.x * sw, y = ev.tfinger.y * sh;
-                int button = overlay.HitButton(x, y, sw, sh);
-                if (engine && (engine->briefing || engine->dialogue->Playing())) button = 0;
-                if (touches.empty() && button != 0 && !levels.empty()) {
-                    if (button > 0) loadLevel((levelIndex + 1) % levels.size());
-                    else loadLevel((levelIndex + levels.size() - 1) % levels.size());
+                if (menus.screen != Menus::NONE) {
+                    if (touches.empty()) menuTap(x, y);
                     break;
                 }
                 if (touches.empty() && engine && pressButton(x, y)) break;
@@ -457,10 +567,8 @@ int main(int argc, char** argv) {
             }
             case SDL_MOUSEBUTTONDOWN:
                 if (ev.button.which != SDL_TOUCH_MOUSEID) {
-                    int button = overlay.HitButton((float)ev.button.x, (float)ev.button.y, sw, sh);
-                    if (button != 0 && !levels.empty()) {
-                        if (button > 0) loadLevel((levelIndex + 1) % levels.size());
-                        else loadLevel((levelIndex + levels.size() - 1) % levels.size());
+                    if (menus.screen != Menus::NONE) {
+                        menuTap((float)ev.button.x, (float)ev.button.y);
                     } else if (engine && pressButton((float)ev.button.x, (float)ev.button.y)) {
                     } else if (engine && ev.button.button == SDL_BUTTON_RIGHT) {
                         engine->OrderStop();
@@ -499,7 +607,40 @@ int main(int argc, char** argv) {
         if (dt > 0.1) dt = 0.1;
         SDL_GL_GetDrawableSize(window, &sw, &sh);
 
-        if (engine) {
+        // a saved game played again: as much as fits in a frame
+        if (engine && menus.screen == Menus::REPLAY) {
+            Uint32 t0 = SDL_GetTicks();
+            while (engine->Replaying() && SDL_GetTicks() - t0 < 30) engine->ReplaySome(10);
+            menus.replayProgress = engine->ReplayProgress();
+            if (!engine->Replaying()) {
+                menus.screen = Menus::NONE;
+                cam.x = engine->camera.x;
+                cam.y = engine->camera.y;
+                cam.Stop();
+                engine->cameraMoved = false;
+                lastAutoTick = engine->ticks;
+            }
+        }
+        // the end of the mission
+        if (engine && menus.screen == Menus::NONE) {
+            if (engine->missionResult == 1) {
+                menus.Accomplished(menus.MissionOfLevel(engine->levelName));
+                remove(menus.SlotPath(0).c_str());
+                menus.Open(Menus::VICTORY);
+            } else if (engine->missionFailed || engine->missionResult == 2) {
+                std::string who = engine->deadHero ? engine->deadHero->KindName() : "";
+                menus.failedWho = who;
+                menus.Open(Menus::FAILED);
+            } else if (engine->ticks - lastAutoTick >= 25 * 60) {
+                autosave();
+            }
+        }
+        bool showGame = engine && (menus.screen == Menus::NONE || menus.screen == Menus::PAUSE ||
+                                   menus.screen == Menus::VICTORY || menus.screen == Menus::FAILED ||
+                                   menus.screen == Menus::REPLAY ||
+                                   ((menus.screen == Menus::OPTIONS || menus.screen == Menus::LOAD ||
+                                     menus.screen == Menus::SAVE) && menus.returnTo != Menus::MAIN));
+        if (showGame && menus.screen != Menus::REPLAY) {
             cam.Update((float)dt, engine->mapW, engine->mapH, sw, sh);
             // the engine's screen follows the zoom
             int ew, eh;
@@ -509,7 +650,7 @@ int main(int argc, char** argv) {
                 engine->screen = SBGeoVector2D((float)ew, (float)eh);
             }
             // the original's 25 Hz tick
-            tickAcc += dt;
+            tickAcc += menus.screen == Menus::NONE ? dt : 0;
             int steps = 0;
             while (tickAcc >= 0.04 && steps < 4) {
                 engine->PerformHourglass();
@@ -560,28 +701,51 @@ int main(int argc, char** argv) {
         glClearColor(0, 0, 0, 1);
         glClear(GL_COLOR_BUFFER_BIT);
         overlay.Begin(sw, sh);
-        if (engine) {
+        if (showGame && menus.screen != Menus::REPLAY) {
             // the engine's picture, scaled, shifted by the camera's fraction for smooth scrolling
             float s = cam.ScreenScale(sh);
             float fx = cam.x - std::floor(cam.x), fy = cam.y - std::floor(cam.y);
             overlay.Picture(draw.ScreenTexture(), draw.ScreenWidth(), draw.ScreenHeight(), -fx * s, -fy * s,
                             draw.ScreenWidth() * s, draw.ScreenHeight() * s);
         }
-        if (!engine || (!engine->briefing && !engine->dialogue->Playing())) overlay.LevelBar(levelIndex + 1, levels.size(), sw, sh);
-        if (engine) ui.Draw(overlay, engine.get(), sw, sh);
-        for (const UIButton& b : layoutButtons(engine.get(), sw, sh)) {
+        bool hud = engine && menus.screen == Menus::NONE;
+        if (hud) ui.Draw(overlay, engine.get(), sw, sh);
+        for (const UIButton& b : layoutButtons(hud ? engine.get() : nullptr, sw, sh)) {
             overlay.Rect(b.x, b.y, b.w, b.h, b.on ? 0.25f : 0.0f, b.on ? 0.35f : 0.0f, 0.0f, 0.55f);
             overlay.Text(b.label.c_str(), b.x + b.w * 0.5f, b.y + b.h * 0.5f, b.h * 0.32f, true);
         }
         if (!loadError.empty()) overlay.Text(loadError.c_str(), sw * 0.5f, sh * 0.5f, sh * 0.04f, true);
-        if (engine && engine->missionFailed && engine->missionResult == 0) {
-            std::string who = engine->deadHero ? engine->deadHero->KindName() : "A HERO";
-            for (char& c : who) c = (char)toupper((unsigned char)c);
-            overlay.Rect(0, sh * 0.38f, (float)sw, sh * 0.24f, 0.25f, 0.0f, 0.0f, 0.6f);
-            overlay.Text((who + " IS DEAD - MISSION FAILED").c_str(), sw * 0.5f, sh * 0.46f, sh * 0.05f, true);
-            overlay.Text("TAP TO TRY AGAIN", sw * 0.5f, sh * 0.54f, sh * 0.035f, true);
-        }
+        menus.Draw(overlay, ui, engine.get(), sw, sh);
 #ifndef __ANDROID__
+        // desktop check: DVTAPS=ms:x,y;ms:x,y taps the menus / the buttons at those times
+        if (const char* taps = getenv("DVTAPS")) {
+            static Uint32 start = SDL_GetTicks();
+            static size_t next = 0;
+            std::vector<std::string> list;
+            for (const char* q = taps; *q;) {
+                const char* e = strchr(q, ';');
+                list.push_back(std::string(q, e ? (size_t)(e - q) : strlen(q)));
+                q = e ? e + 1 : q + strlen(q);
+            }
+            if (next < list.size()) {
+                unsigned ms = 0;
+                float tx = 0, ty = 0;
+                if (sscanf(list[next].c_str(), "%u", &ms) == 1 && SDL_GetTicks() - start >= ms && engine &&
+                    (list[next].find(":win") != std::string::npos || list[next].find(":fail") != std::string::npos)) {
+                    ++next;
+                    if (list[next - 1].find(":win") != std::string::npos) engine->missionResult = 1;
+                    else engine->missionFailed = true;
+                } else if (sscanf(list[next].c_str(), "%u:%f,%f", &ms, &tx, &ty) == 3 && SDL_GetTicks() - start >= ms) {
+                    ++next;
+                    SBLog("test tap at %.0f,%.0f", tx, ty);
+                    if (menus.screen != Menus::NONE) menuTap(tx, ty);
+                    else if (engine && !pressButton(tx, ty)) {
+                        float sc = cam.ScreenScale(sh);
+                        onTap(SBGeoPoint2D(cam.x + tx / sc, cam.y + ty / sc), tx, ty);
+                    }
+                }
+            }
+        }
         // desktop check: DVSHOT=seconds,picture.ppm[,level] writes the window after that long and quits
         if (const char* shot = getenv("DVSHOT")) {
             static Uint32 start = SDL_GetTicks();
@@ -602,6 +766,7 @@ int main(int argc, char** argv) {
 #endif
         SDL_GL_SwapWindow(window);
     }
+    autosave();
     StopVoice();
     MixerStopAll();
     engine.reset();
